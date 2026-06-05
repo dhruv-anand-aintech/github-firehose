@@ -541,6 +541,25 @@ export default {
       return new Response(JSON.stringify({ ok: true }), { headers: { ...corsHeaders(), 'Content-Type': 'application/json' } });
     }
 
+    if (url.pathname === '/deploy-notify' && request.method === 'POST') {
+      const body = await request.json() as Record<string, any>;
+      const pin = String(body.pin || '').trim();
+      if (pin !== pinValue(env)) {
+        return new Response('Unauthorized', { status: 401 });
+      }
+      const worker = String(body.worker || 'unknown');
+      await storeEvent(env, {
+        source: 'cloudflare',
+        type: 'deploy',
+        receivedAt: new Date().toISOString(),
+        payload: {
+          name: `Worker deployed: ${worker}`,
+          data: { script_name: worker, actor: 'wrangler-cli' },
+        },
+      });
+      return new Response(JSON.stringify({ ok: true }), { headers: { ...corsHeaders(), 'Content-Type': 'application/json' } });
+    }
+
     if (url.pathname === '/cloudflare-webhook' && request.method === 'POST') {
       const token = request.headers.get('cf-webhook-auth');
       if (!env.CF_WEBHOOK_TOKEN || token !== env.CF_WEBHOOK_TOKEN) {
