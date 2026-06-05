@@ -1,9 +1,18 @@
-import { FirehoseDO } from './firehose-do';
-export { FirehoseDO };
-
 export interface Env {
-  FIREHOSE: DurableObjectNamespace;
+  FIREHOSE_KV: KVNamespace;
   GITHUB_WEBHOOK_SECRET: string;
+}
+
+const EVENTS_KEY = 'events';
+const MAX_EVENTS = 5000;
+
+interface FirehoseEvent {
+  id?: string;
+  externalId?: string;
+  source: string;
+  type: string;
+  receivedAt?: string;
+  payload: Record<string, any>;
 }
 
 async function verifyGitHubSignature(
@@ -35,6 +44,31 @@ function corsHeaders(): HeadersInit {
   };
 }
 
+function eventTime(event: FirehoseEvent): number {
+  return new Date(event.receivedAt || 0).getTime();
+}
+
+async function readEvents(env: Env): Promise<FirehoseEvent[]> {
+  return (await env.FIREHOSE_KV.get<FirehoseEvent[]>(EVENTS_KEY, 'json')) || [];
+}
+
+async function storeEvent(env: Env, event: FirehoseEvent): Promise<FirehoseEvent> {
+  const enriched = {
+    ...event,
+    id: event.id || crypto.randomUUID(),
+    receivedAt: event.receivedAt || new Date().toISOString(),
+  };
+  const events = await readEvents(env);
+  const deduped = events.filter((item) => {
+    if (enriched.externalId && item.externalId === enriched.externalId) return false;
+    return item.id !== enriched.id;
+  });
+  deduped.push(enriched);
+  deduped.sort((a, b) => eventTime(b) - eventTime(a));
+  await env.FIREHOSE_KV.put(EVENTS_KEY, JSON.stringify(deduped.slice(0, MAX_EVENTS)));
+  return enriched;
+}
+
 const DASHBOARD_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -43,187 +77,77 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   <title>GitHub Firehose</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: #0f172a;
-      color: #f8fafc;
-      min-height: 100vh;
-    }
-    .header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 20px;
-      background: #1e293b;
-      border-bottom: 1px solid #334155;
-      position: sticky;
-      top: 0;
-      z-index: 10;
-    }
-    .header h1 { font-size: 1.5rem; font-weight: 700; }
-    .status {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 6px 14px;
-      border-radius: 20px;
-      font-size: 0.85rem;
-      font-weight: 600;
-      transition: background 0.3s;
-    }
-    .status.online { background: #22c55e; color: #fff; }
-    .status.offline { background: #ef4444; color: #fff; }
-    .status-dot {
-      width: 8px; height: 8px;
-      border-radius: 50%;
-      background: currentColor;
-      animation: pulse 2s infinite;
-    }
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.5; }
-    }
-    .container {
-      max-width: 800px;
-      margin: 0 auto;
-      padding: 20px;
-    }
-    .stats {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-      gap: 12px;
-      margin-bottom: 20px;
-    }
-    .stat-card {
-      background: #1e293b;
-      padding: 16px;
-      border-radius: 12px;
-      border: 1px solid #334155;
-    }
-    .stat-card .label { font-size: 0.85rem; color: #94a3b8; margin-bottom: 4px; }
-    .stat-card .value { font-size: 1.5rem; font-weight: 700; }
-    .events {
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-    .event {
-      background: #1e293b;
-      border: 1px solid #334155;
-      border-radius: 12px;
-      padding: 16px;
-      transition: transform 0.2s, border-color 0.2s;
-      animation: slideIn 0.3s ease-out;
-    }
-    .event:hover { transform: translateX(4px); border-color: #64748b; }
-    @keyframes slideIn {
-      from { opacity: 0; transform: translateY(-10px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-    .event-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: 8px;
-    }
-    .event-type {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 4px 10px;
-      border-radius: 6px;
-      font-size: 0.75rem;
-      font-weight: 600;
-      text-transform: uppercase;
-    }
-    .event-type.push { background: #3b82f6; color: #fff; }
-    .event-type.pull_request { background: #a855f7; color: #fff; }
-    .event-type.issues { background: #f59e0b; color: #fff; }
-    .event-type.default { background: #64748b; color: #fff; }
-    .event-time { font-size: 0.8rem; color: #64748b; }
-    .event-title { font-size: 1rem; font-weight: 600; margin-bottom: 4px; color: #e2e8f0; }
-    .event-repo { font-size: 0.9rem; color: #94a3b8; }
-    .event-author { font-size: 0.85rem; color: #64748b; margin-top: 8px; }
-    .empty {
-      text-align: center;
-      padding: 60px 20px;
-      color: #64748b;
-    }
-    .empty-icon { font-size: 3rem; margin-bottom: 12px; }
-    .config {
-      background: #1e293b;
-      border: 1px solid #334155;
-      border-radius: 12px;
-      padding: 16px;
-      margin-bottom: 20px;
-    }
-    .config h2 { font-size: 1rem; margin-bottom: 12px; }
-    .config code {
-      display: block;
-      background: #0f172a;
-      padding: 12px;
-      border-radius: 8px;
-      font-size: 0.85rem;
-      color: #94a3b8;
-      overflow-x: auto;
-      word-break: break-all;
-    }
-    .config .copy-btn {
-      margin-top: 8px;
-      padding: 6px 14px;
-      background: #3b82f6;
-      color: #fff;
-      border: none;
-      border-radius: 6px;
-      cursor: pointer;
-      font-size: 0.85rem;
-    }
-    @media (max-width: 600px) {
-      .header { flex-direction: column; gap: 12px; align-items: flex-start; }
-      .container { padding: 12px; }
-    }
+    body { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; background: #111317; color: #f4f0e8; min-height: 100vh; }
+    .header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; background: #181b20; border-bottom: 1px solid #2a2f36; position: sticky; top: 0; z-index: 10; }
+    .header h1 { font-size: 1rem; font-weight: 700; letter-spacing: 0; }
+    .status { display: flex; align-items: center; gap: 8px; padding: 4px 9px; border-radius: 6px; font-size: 0.75rem; font-weight: 700; background: #12392f; color: #b7f7d3; border: 1px solid #1f6f55; }
+    .status-dot { width: 6px; height: 6px; border-radius: 50%; background: #41d98b; }
+    .container { max-width: 1120px; margin: 0 auto; padding: 12px; }
+    .topbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; margin-bottom: 10px; }
+    .stats { display: grid; grid-template-columns: repeat(3, minmax(96px, 1fr)); gap: 8px; }
+    .stat-card, .config { background: #181b20; padding: 10px; border-radius: 6px; border: 1px solid #2a2f36; }
+    .stat-card .label { font-size: 0.68rem; color: #9aa3ad; margin-bottom: 2px; text-transform: uppercase; }
+    .stat-card .value { font-size: 1.15rem; font-weight: 800; color: #f8d66d; }
+    .config h2 { font-size: 0.72rem; margin-bottom: 6px; color: #9aa3ad; text-transform: uppercase; }
+    .config code { display: block; background: #0b0d10; padding: 8px; border-radius: 5px; font-size: 0.74rem; color: #c4cad2; overflow-x: auto; word-break: break-all; border: 1px solid #252a31; }
+    .copy-btn, .pager button { margin-top: 7px; padding: 6px 10px; background: #e2b84b; color: #15120a; border: none; border-radius: 5px; cursor: pointer; font-size: 0.78rem; font-weight: 800; }
+    .copy-btn:disabled, .pager button:disabled { opacity: 0.45; cursor: not-allowed; }
+    .events { display: grid; gap: 6px; }
+    .event { display: grid; grid-template-columns: 102px minmax(0, 1fr) minmax(120px, 172px); gap: 10px; align-items: center; background: #181b20; border: 1px solid #2a2f36; border-left: 3px solid #4f5b66; border-radius: 6px; padding: 8px 10px; }
+    .event-header { display: flex; align-items: center; min-width: 0; }
+    .event-type { display: inline-flex; align-items: center; justify-content: center; width: 92px; padding: 4px 6px; border-radius: 4px; font-size: 0.68rem; font-weight: 800; text-transform: uppercase; background: #4f5b66; color: #fff; }
+    .event-type.push { background: #2b66c3; }
+    .event-type.commit { background: #16835a; }
+    .event-type.pull_request { background: #8b54cb; }
+    .event-type.issues { background: #bb7b16; }
+    .event-time { font-size: 0.72rem; color: #9aa3ad; text-align: right; overflow-wrap: anywhere; }
+    .event-title { font-size: 0.88rem; font-weight: 700; color: #f4f0e8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .event-repo { font-size: 0.75rem; color: #9aa3ad; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .event-author { font-size: 0.72rem; color: #d0a84b; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .event-origin { font-size: 0.7rem; color: #7f8a96; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .empty { text-align: center; padding: 28px 16px; color: #9aa3ad; border: 1px dashed #3a414a; border-radius: 6px; }
+    .pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; color: #9aa3ad; font-size: 0.82rem; }
+    @media (max-width: 760px) { .topbar { grid-template-columns: 1fr; } .event { grid-template-columns: 88px minmax(0, 1fr); } .event-time { grid-column: 1 / -1; text-align: left; white-space: normal; } .event-type { width: 78px; } }
+    @media (max-width: 520px) { .header { align-items: flex-start; } .stats { grid-template-columns: repeat(3, 1fr); } .stat-card .value { font-size: 0.96rem; } .pager { flex-direction: column; align-items: stretch; } }
   </style>
 </head>
 <body>
   <div class="header">
     <h1>GitHub Firehose</h1>
-    <div class="status offline" id="status">
-      <div class="status-dot"></div>
-      <span id="statusText">Connecting...</span>
-    </div>
+    <div class="status"><div class="status-dot"></div><span>KV persisted</span></div>
   </div>
   <div class="container">
-    <div class="config">
-      <h2>Webhook URL</h2>
-      <code id="webhookUrl">Loading...</code>
-      <button class="copy-btn" onclick="copyWebhook()">Copy</button>
-    </div>
-    <div class="stats">
-      <div class="stat-card">
-        <div class="label">Total Events</div>
-        <div class="value" id="totalEvents">0</div>
+    <div class="topbar">
+      <div class="config">
+        <h2>Webhook URL</h2>
+        <code id="webhookUrl">Loading...</code>
+        <button class="copy-btn" onclick="copyWebhook()">Copy</button>
       </div>
-      <div class="stat-card">
-        <div class="label">Events/min</div>
-        <div class="value" id="eventsPerMin">0</div>
-      </div>
-      <div class="stat-card">
-        <div class="label">Connected</div>
-        <div class="value" id="connectedCount">0</div>
+      <div class="stats">
+        <div class="stat-card"><div class="label">Total</div><div class="value" id="totalEvents">0</div></div>
+        <div class="stat-card"><div class="label">Page</div><div class="value" id="pageValue">1</div></div>
+        <div class="stat-card"><div class="label">Visible</div><div class="value" id="visibleEvents">0</div></div>
       </div>
     </div>
-    <div class="events" id="events">
-      <div class="empty">
-        <div class="empty-icon">📡</div>
-        <div>Waiting for events... Set up your GitHub webhook to see commits flow in.</div>
-      </div>
+    <div class="events" id="events"></div>
+    <div class="pager">
+      <button id="prevBtn" onclick="loadPage(page - 1)">Previous</button>
+      <span id="pageInfo">Page 1</span>
+      <button id="nextBtn" onclick="loadPage(page + 1)">Next</button>
     </div>
   </div>
   <script>
-    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = protocol + '//' + location.host + '/websocket';
     const webhookUrl = location.origin + '/github-webhook';
     document.getElementById('webhookUrl').textContent = webhookUrl;
+    const eventsContainer = document.getElementById('events');
+    const totalEl = document.getElementById('totalEvents');
+    const pageEl = document.getElementById('pageValue');
+    const visibleEl = document.getElementById('visibleEvents');
+    const pageInfoEl = document.getElementById('pageInfo');
+    const prevBtn = document.getElementById('prevBtn');
+    const nextBtn = document.getElementById('nextBtn');
+    let page = 1;
+    const perPage = 25;
 
     function copyWebhook() {
       navigator.clipboard.writeText(webhookUrl);
@@ -232,89 +156,65 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       setTimeout(() => btn.textContent = 'Copy', 2000);
     }
 
-    const eventsContainer = document.getElementById('events');
-    const totalEl = document.getElementById('totalEvents');
-    const epmEl = document.getElementById('eventsPerMin');
-    const connectedEl = document.getElementById('connectedCount');
-    const statusEl = document.getElementById('status');
-    const statusTextEl = document.getElementById('statusText');
-    let total = 0;
-    let events = [];
-
     function renderEvent(event) {
       const div = document.createElement('div');
       div.className = 'event';
       const type = event.type || 'unknown';
-      const typeClass = ['push', 'pull_request', 'issues'].includes(type) ? type : 'default';
-
-      let title = 'Unknown event';
-      let repo = 'unknown';
-      let author = '';
+      const typeClass = ['push', 'commit', 'pull_request', 'issues'].includes(type) ? type : '';
+      let title = type + ' event';
+      let repo = event.payload?.repository?.full_name || event.payload?.repo || 'unknown';
+      let author = event.payload?.sender?.login || '';
+      let origin = event.payload?.origin || {};
 
       if (event.source === 'github') {
         if (type === 'push') {
           const commit = event.payload.head_commit;
           title = commit ? commit.message.split('\\n')[0] : 'Push to ' + (event.payload.ref || 'unknown');
-          repo = event.payload.repository?.full_name || 'unknown';
-          author = event.payload.pusher?.name || '';
+          author = event.payload.pusher?.name || author;
+        } else if (type === 'commit') {
+          title = event.payload.commit?.message?.split('\\n')[0] || event.payload.message || 'Commit';
+          repo = event.payload.repository?.full_name || repo;
+          author = event.payload.commit?.author?.name || event.payload.author?.login || author;
         } else if (type === 'pull_request') {
           title = event.payload.pull_request?.title || 'PR event';
-          repo = event.payload.repository?.full_name || 'unknown';
-          author = event.payload.pull_request?.user?.login || '';
+          author = event.payload.pull_request?.user?.login || author;
         } else if (type === 'issues') {
           title = event.payload.issue?.title || 'Issue event';
-          repo = event.payload.repository?.full_name || 'unknown';
-          author = event.payload.issue?.user?.login || '';
-        } else {
-          title = type + ': ' + (event.payload.repository?.full_name || 'unknown');
-          repo = event.payload.repository?.full_name || 'unknown';
+          author = event.payload.issue?.user?.login || author;
         }
       }
 
-      div.innerHTML = \`
-        <div class="event-header">
-          <span class="event-type \${typeClass}">\${type}</span>
-          <span class="event-time">\${new Date(event.receivedAt).toLocaleTimeString()}</span>
-        </div>
-        <div class="event-title">\${title}</div>
-        <div class="event-repo">\${repo}</div>
-        \${author ? \`<div class="event-author">by \${author}</div>\` : ''}
-      \`;
+      const originText = [origin.device || event.payload?.delivery_source || 'GitHub remote', origin.location || 'location unknown'].join(' / ');
+      div.innerHTML = '<div class="event-header"><span class="event-type ' + typeClass + '">' + type + '</span></div><div><div class="event-title"></div><div class="event-repo"></div>' + (author ? '<div class="event-author">by ' + author + '</div>' : '') + '<div class="event-origin"></div></div><span class="event-time">' + new Date(event.receivedAt).toLocaleString() + '</span>';
+      div.querySelector('.event-title').textContent = title;
+      div.querySelector('.event-repo').textContent = repo;
+      div.querySelector('.event-origin').textContent = originText;
       return div;
     }
 
-    function connect() {
-      const ws = new WebSocket(wsUrl);
-      ws.onopen = () => {
-        statusEl.className = 'status online';
-        statusTextEl.textContent = 'Live';
-      };
-      ws.onclose = () => {
-        statusEl.className = 'status offline';
-        statusTextEl.textContent = 'Reconnecting...';
-        setTimeout(connect, 3000);
-      };
-      ws.onmessage = (e) => {
-        const msg = JSON.parse(e.data);
-        if (msg.type === 'event') {
-          const event = msg.data;
-          total++;
-          events.push({ time: Date.now() });
-          events = events.filter(e => Date.now() - e.time < 60000);
-          totalEl.textContent = total;
-          epmEl.textContent = events.length;
-          const empty = eventsContainer.querySelector('.empty');
-          if (empty) empty.remove();
-          eventsContainer.insertBefore(renderEvent(event), eventsContainer.firstChild);
-          while (eventsContainer.children.length > 100) {
-            eventsContainer.lastChild.remove();
-          }
-        } else if (msg.type === 'stats') {
-          connectedEl.textContent = msg.connected || 0;
-        }
-      };
+    async function loadPage(nextPage) {
+      if (nextPage < 1) return;
+      const res = await fetch('/api/events?page=' + nextPage + '&per_page=' + perPage);
+      const data = await res.json();
+      page = data.page;
+      eventsContainer.innerHTML = '';
+      if (data.events.length === 0) {
+        eventsContainer.innerHTML = '<div class="empty"><div>Waiting for events.</div></div>';
+      } else {
+        data.events.forEach((event) => eventsContainer.appendChild(renderEvent(event)));
+      }
+      totalEl.textContent = data.total;
+      pageEl.textContent = data.page;
+      visibleEl.textContent = data.events.length;
+      pageInfoEl.textContent = 'Page ' + data.page + ' of ' + Math.max(1, Math.ceil(data.total / data.perPage));
+      prevBtn.disabled = data.page <= 1;
+      nextBtn.disabled = !data.hasMore;
     }
-    connect();
+
+    loadPage(1);
+    setInterval(() => {
+      if (page === 1) loadPage(1);
+    }, 10000);
   </script>
 </body>
 </html>`;
@@ -326,17 +226,13 @@ export default {
     }
 
     const url = new URL(request.url);
-    const id = env.FIREHOSE.idFromName('main');
-    const firehose = env.FIREHOSE.get(id);
 
-    // Built-in dashboard
     if (url.pathname === '/' || url.pathname === '/dashboard') {
       return new Response(DASHBOARD_HTML, {
         headers: { 'Content-Type': 'text/html' },
       });
     }
 
-    // GitHub webhook
     if (url.pathname === '/github-webhook') {
       const signature = request.headers.get('x-hub-signature-256');
       const body = await request.text();
@@ -347,44 +243,43 @@ export default {
 
       const eventType = request.headers.get('x-github-event') || 'unknown';
       const payload = JSON.parse(body);
-
-      await firehose.fetch(
-        new Request('http://internal/ingest', {
-          method: 'POST',
-          body: JSON.stringify({
-            source: 'github',
-            type: eventType,
-            payload,
-          }),
-        })
-      );
+      await storeEvent(env, {
+        source: 'github',
+        type: eventType,
+        receivedAt: payload.head_commit?.timestamp || new Date().toISOString(),
+        payload: {
+          ...payload,
+          origin: {
+            device: 'GitHub webhook',
+            location: 'unknown',
+          },
+        },
+      });
 
       return new Response('OK', { headers: corsHeaders() });
     }
 
-    // Generic ingest endpoint for future event sources
-    if (url.pathname === '/ingest') {
-      const body = await request.json();
-      await firehose.fetch(
-        new Request('http://internal/ingest', {
-          method: 'POST',
-          body: JSON.stringify(body),
-        })
-      );
+    if (url.pathname === '/ingest' && request.method === 'POST') {
+      if (request.headers.get('authorization') !== `Bearer ${env.GITHUB_WEBHOOK_SECRET}`) {
+        return new Response('Unauthorized', { status: 401 });
+      }
+      const body = (await request.json()) as FirehoseEvent;
+      await storeEvent(env, body);
       return new Response('OK', { headers: corsHeaders() });
     }
 
-    // WebSocket endpoint
-    if (url.pathname === '/websocket') {
-      return firehose.fetch(request);
-    }
-
-    // REST API for recent events
     if (url.pathname === '/api/events') {
-      const response = await firehose.fetch(
-        new Request('http://internal/api/events')
-      );
-      return new Response(response.body, {
+      const page = Math.max(1, Number(url.searchParams.get('page') || '1'));
+      const perPage = Math.min(100, Math.max(1, Number(url.searchParams.get('per_page') || '25')));
+      const events = (await readEvents(env)).sort((a, b) => eventTime(b) - eventTime(a));
+      const start = (page - 1) * perPage;
+      return new Response(JSON.stringify({
+        events: events.slice(start, start + perPage),
+        page,
+        perPage,
+        total: events.length,
+        hasMore: start + perPage < events.length,
+      }), {
         headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
       });
     }
