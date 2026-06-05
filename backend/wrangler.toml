@@ -1,0 +1,14 @@
+name = "github-firehose"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+
+[vars]
+# GITHUB_WEBHOOK_SECRET = "your-secret-here"
+
+[[durable_objects.bindings]]
+name = "FIREHOSE"
+class_name = "FirehoseDO"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["FirehoseDO"]

@@ -1,0 +1,59 @@
+name: Build Android APK
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        run: |
+          cd mobile-dashboard
+          npm install
+
+      - name: Build Android APK (Expo EAS)
+        run: |
+          cd mobile-dashboard
+          npm install -g eas-cli
+          eas build --platform android --profile preview --non-interactive
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        continue-on-error: true
+
+      - name: Build with Gradle (fallback)
+        if: failure()
+        run: |
+          cd mobile-dashboard/android
+          ./gradlew assembleRelease
+        continue-on-error: true
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: |
+            mobile-dashboard/android/app/build/outputs/apk/release/*.apk
+            *.apk
+        continue-on-error: true
