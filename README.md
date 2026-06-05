@@ -1,42 +1,28 @@
 # GitHub Firehose
 
-A live-updating event dashboard that ingests GitHub webhooks and broadcasts them to connected clients via WebSocket. Built on Cloudflare Workers with Durable Objects for state persistence.
+A compact Cloudflare Worker dashboard for GitHub webhooks. It verifies GitHub webhook signatures, stores recent events in Cloudflare KV, and serves a paginated dashboard from the same Worker.
+
+## Features
+
+- GitHub webhook signature verification
+- Cloudflare KV persistence
+- Paginated REST API, newest first
+- Compact dashboard served by the Worker
+- Client-side event display configuration with `localStorage`
+- Coding-agent attribution from commit trailers and known agent markers
+- Mobile-friendly event list
+- Optional generic `/ingest` endpoint protected by the webhook secret
 
 ## Architecture
 
-```
-GitHub Webhook ──► Cloudflare Worker ──► Durable Object
-                                              │
-                                              ├──► WebSocket broadcast
-                                              ├──► Event history storage
-                                              └──► REST API
-```
-
-- **Backend**: Cloudflare Worker + Durable Object
-- **Web Dashboard**: React (served directly from the Worker or via Vite)
-- **Mobile Dashboard**: React Native (iOS/Android)
-
-## Project Structure
-
-```
-github-firehose/
-├── backend/              # Cloudflare Worker API
-│   ├── src/
-│   │   ├── index.ts      # Main worker entry
-│   │   └── firehose-do.ts # Durable Object for state + WebSocket
-│   ├── wrangler.toml
-│   └── package.json
-├── web-dashboard/        # React web app
-│   ├── src/
-│   │   ├── App.tsx
-│   │   └── main.tsx
-│   └── vite.config.ts
-├── mobile-dashboard/     # React Native app
-│   └── App.tsx
-└── README.md
+```text
+GitHub webhook -> Cloudflare Worker -> Cloudflare KV
+                                      |
+                                      +-> dashboard
+                                      +-> /api/events
 ```
 
-## Quick Start (Backend)
+## Setup
 
 ### 1. Install dependencies
 
@@ -45,114 +31,159 @@ cd backend
 npm install
 ```
 
-### 2. Set up your GitHub webhook secret
+### 2. Create KV
 
 ```bash
-wrangler secret put GITHUB_WEBHOOK_SECRET
+npx wrangler kv namespace create FIREHOSE_KV
 ```
 
-Enter a secure random string (e.g., `openssl rand -hex 32`).
+Copy the returned namespace id into `backend/wrangler.toml`:
 
-### 3. Deploy
+```toml
+[[kv_namespaces]]
+binding = "FIREHOSE_KV"
+id = "your-kv-namespace-id"
+```
+
+### 3. Configure the Worker route
+
+For a `workers.dev` deployment, remove the `routes` block and set:
+
+```toml
+workers_dev = true
+```
+
+For a custom domain on a Cloudflare-managed zone:
+
+```toml
+[[routes]]
+pattern = "firehose.example.com"
+custom_domain = true
+```
+
+### 4. Add the webhook secret
+
+Generate a secret locally:
+
+```bash
+openssl rand -hex 32
+```
+
+Save it to Cloudflare:
+
+```bash
+npx wrangler secret put GITHUB_WEBHOOK_SECRET
+```
+
+Use the same value when creating the GitHub webhook. Do not commit it.
+
+### 5. Deploy
 
 ```bash
 npm run deploy
 ```
 
-This will give you a URL like `https://github-firehose.your-account.workers.dev`.
+Open the deployed Worker URL. The dashboard shows the exact webhook URL:
 
-### 4. Configure GitHub webhook
-
-1. Go to any GitHub repo → Settings → Webhooks
-2. Add webhook
-3. Payload URL: `https://github-firehose.your-account.workers.dev/github-webhook`
-4. Content type: `application/json`
-5. Secret: the same secret you set in step 2
-6. Select events: `Pushes`, `Pull requests`, `Issues` (or "Let me select individual events")
-7. Save
-
-### 5. Open the dashboard
-
-Visit `https://github-firehose.your-account.workers.dev/` — the dashboard is built into the Worker.
-
-## Web Dashboard (React)
-
-The Worker serves a built-in HTML dashboard, but there's also a proper React app in `web-dashboard/`.
-
-```bash
-cd web-dashboard
-npm install
-npm run dev       # Local dev
-npm run build     # Production build
+```text
+https://your-worker-host/github-webhook
 ```
 
-To deploy the React app on Cloudflare:
+## GitHub Webhook Setup
 
-- **Option A**: Use Cloudflare Pages (drag & drop the `dist/` folder, or use `wrangler pages deploy`)
-- **Option B**: Use Cloudflare Workers with static assets (newer Workers feature)
-- **Option C**: Just use the built-in dashboard served directly from the Worker
+In a GitHub repository:
 
-## Mobile Dashboard (React Native)
+1. Open `Settings`.
+2. Open `Webhooks`.
+3. Click `Add webhook`.
+4. Set `Payload URL` to `https://your-worker-host/github-webhook`.
+5. Set `Content type` to `application/json`.
+6. Set `Secret` to the same value stored in `GITHUB_WEBHOOK_SECRET`.
+7. Choose the events you want GitHub to send, for example:
+   - `Pushes`
+   - `Pull requests`
+   - `Issues`
+8. Save the webhook.
+9. Check `Recent Deliveries`; GitHub should show a `ping` delivery with HTTP `200`.
 
-The React Native app connects to the same WebSocket endpoint.
+For an organization-level feed, create the webhook in organization settings instead of repository settings.
 
-### Setup
+## Client-Side Display Config
 
-```bash
-cd mobile-dashboard
-npm install
-# Update WS_URL and API_URL in App.tsx with your Worker URL
-npx expo start
+The dashboard fetches paginated events from the Worker and filters display in the browser. The selected event types are stored in `localStorage` under:
+
+```text
+github-firehose-visible-types
 ```
 
-Scan the QR code with Expo Go (iOS/Android) to run.
+This only changes what the current browser displays. It does not change which events GitHub sends or what the Worker stores. To change ingestion, update the GitHub webhook event selections.
 
-### Deploying React Native
+## Coding-Agent Attribution
 
-React Native apps are **not** deployable to Cloudflare Workers. They compile to native iOS/Android binaries. You'd need:
-- Expo EAS Build (`eas build`)
-- Or Xcode/Android Studio for manual builds
+The dashboard marks commits that appear to have coding-agent coauthors. Detection is client-side and based on commit text in the webhook payload:
 
-## Extending the Firehose
+- `Co-authored-by:` trailers
+- Agent names or email domains in trailers, including Claude, Cursor, Codex, OpenAI, Anthropic, and OpenCode
+- Claude session links or generated-with-Claude markers
 
-The architecture is designed for multiple event sources. Add new ingest endpoints:
+Example commit footer:
 
-```typescript
-// In backend/src/index.ts
-if (url.pathname === '/gitlab-webhook') {
-  // validate GitLab signature
-  await firehose.fetch(new Request('http://internal/ingest', {
-    method: 'POST',
-    body: JSON.stringify({ source: 'gitlab', type: 'push', payload })
-  }));
-  return new Response('OK');
+```text
+Co-authored-by: Claude Sonnet <noreply@example.com>
+```
+
+If a match is found, the event row shows an `agent:` line.
+
+## API
+
+### `GET /api/events`
+
+Query parameters:
+
+- `page`: page number, default `1`
+- `per_page`: page size, default `25`, max `100`
+
+Response:
+
+```json
+{
+  "events": [],
+  "page": 1,
+  "perPage": 25,
+  "total": 0,
+  "hasMore": false
 }
 ```
 
-The frontend automatically handles any `source`/`type` combination.
+### `POST /github-webhook`
 
-## Features
+GitHub webhook endpoint. Requires a valid `x-hub-signature-256` header.
 
-- [x] Real-time WebSocket broadcast
-- [x] Event history persistence (last 1000 events)
-- [x] REST API for historical events
-- [x] GitHub webhook signature verification
-- [x] CORS for cross-origin dashboard hosting
-- [x] Auto-reconnecting WebSocket clients
-- [x] Stats (total events, events/min, connection count)
-- [x] Mobile-responsive design
-- [x] Extensible ingest endpoint for future sources
+### `POST /ingest`
 
-## Environment Variables
+Generic ingest endpoint for custom sources. Requires:
 
-| Variable | Description |
-|----------|-------------|
-| `GITHUB_WEBHOOK_SECRET` | Secret to verify GitHub webhook signatures |
+```text
+Authorization: Bearer <GITHUB_WEBHOOK_SECRET>
+```
 
-## Tech Stack
+## Privacy And Secrets
 
-- **Runtime**: Cloudflare Workers
-- **State**: Durable Objects
-- **Protocol**: WebSocket + REST
-- **Web**: React + Vite + TypeScript
-- **Mobile**: React Native + Expo + TypeScript
+- Webhook secrets are stored with `wrangler secret put`, not in source control.
+- GitHub webhook payloads can include repository names, author names, commit messages, issue titles, and pull request titles.
+- Do not make the deployed dashboard public unless that event data is acceptable to expose.
+- Cloudflare KV namespace ids are not secrets, but use your own namespace for your deployment.
+- This repository intentionally does not include webhook secrets or personal access tokens.
+
+## Development
+
+```bash
+cd backend
+npm run dev
+```
+
+Run checks:
+
+```bash
+npx tsc --noEmit
+```

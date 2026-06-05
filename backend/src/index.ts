@@ -84,6 +84,10 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     .status-dot { width: 6px; height: 6px; border-radius: 50%; background: #41d98b; }
     .container { max-width: 1120px; margin: 0 auto; padding: 12px; }
     .topbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; margin-bottom: 10px; }
+    .client-config { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; padding: 8px 10px; background: #181b20; border: 1px solid #2a2f36; border-radius: 6px; }
+    .client-config-label { color: #9aa3ad; font-size: 0.72rem; font-weight: 800; text-transform: uppercase; }
+    .filter-chip { display: inline-flex; align-items: center; gap: 5px; color: #dbe2ea; font-size: 0.74rem; padding: 4px 7px; border: 1px solid #343b44; border-radius: 5px; background: #111317; cursor: pointer; }
+    .filter-chip input { accent-color: #e2b84b; }
     .stats { display: grid; grid-template-columns: repeat(3, minmax(96px, 1fr)); gap: 8px; }
     .stat-card, .config { background: #181b20; padding: 10px; border-radius: 6px; border: 1px solid #2a2f36; }
     .stat-card .label { font-size: 0.68rem; color: #9aa3ad; margin-bottom: 2px; text-transform: uppercase; }
@@ -104,6 +108,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     .event-title { font-size: 0.88rem; font-weight: 700; color: #f4f0e8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .event-repo { font-size: 0.75rem; color: #9aa3ad; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .event-author { font-size: 0.72rem; color: #d0a84b; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .event-agent { font-size: 0.72rem; color: #8fd6ff; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .event-origin { font-size: 0.7rem; color: #7f8a96; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .empty { text-align: center; padding: 28px 16px; color: #9aa3ad; border: 1px dashed #3a414a; border-radius: 6px; }
     .pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; color: #9aa3ad; font-size: 0.82rem; }
@@ -129,6 +134,14 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         <div class="stat-card"><div class="label">Visible</div><div class="value" id="visibleEvents">0</div></div>
       </div>
     </div>
+    <div class="client-config">
+      <span class="client-config-label">Display</span>
+      <label class="filter-chip"><input type="checkbox" value="push"> Push</label>
+      <label class="filter-chip"><input type="checkbox" value="pull_request"> PR</label>
+      <label class="filter-chip"><input type="checkbox" value="issues"> Issues</label>
+      <label class="filter-chip"><input type="checkbox" value="commit"> Commit</label>
+      <label class="filter-chip"><input type="checkbox" value="ping"> Ping</label>
+    </div>
     <div class="events" id="events"></div>
     <div class="pager">
       <button id="prevBtn" onclick="loadPage(page - 1)">Previous</button>
@@ -146,8 +159,63 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     const pageInfoEl = document.getElementById('pageInfo');
     const prevBtn = document.getElementById('prevBtn');
     const nextBtn = document.getElementById('nextBtn');
+    const filterInputs = Array.from(document.querySelectorAll('.filter-chip input'));
+    const configKey = 'github-firehose-visible-types';
+    const defaultVisibleTypes = ['push', 'pull_request', 'issues', 'commit'];
     let page = 1;
     const perPage = 25;
+    let lastPageData = null;
+
+    function readVisibleTypes() {
+      try {
+        const saved = JSON.parse(localStorage.getItem(configKey) || 'null');
+        return Array.isArray(saved) && saved.length > 0 ? saved : defaultVisibleTypes;
+      } catch {
+        return defaultVisibleTypes;
+      }
+    }
+
+    function writeVisibleTypes(types) {
+      localStorage.setItem(configKey, JSON.stringify(types));
+    }
+
+    function syncFilterInputs() {
+      const visibleTypes = new Set(readVisibleTypes());
+      filterInputs.forEach((input) => {
+        input.checked = visibleTypes.has(input.value);
+      });
+    }
+
+    function selectedTypes() {
+      return new Set(filterInputs.filter((input) => input.checked).map((input) => input.value));
+    }
+
+    function commitText(event) {
+      return [
+        event.payload?.head_commit?.message,
+        event.payload?.commit?.message,
+        ...(event.payload?.commits || []).map((commit) => commit.message),
+      ].filter(Boolean).join('\\n');
+    }
+
+    function codingAgents(event) {
+      const text = commitText(event);
+      const agents = new Set();
+      const trailerPattern = /^co-authored-by:\\s*([^<\\n]+)(?:<([^>]+)>)?/gim;
+      let match;
+      while ((match = trailerPattern.exec(text)) !== null) {
+        const name = match[1].trim();
+        const email = (match[2] || '').toLowerCase();
+        if (/claude|anthropic/i.test(name) || email.includes('anthropic')) agents.add(name);
+        if (/codex|openai/i.test(name) || email.includes('openai')) agents.add(name);
+        if (/cursor/i.test(name) || email.includes('cursor')) agents.add(name);
+        if (/opencode/i.test(name)) agents.add(name);
+      }
+      if (/claude\\.ai\\/code|generated with claude|anthropic/i.test(text)) agents.add('Claude');
+      if (/cursoragent@cursor\\.com/i.test(text)) agents.add('Cursor');
+      if (/noreply@openai\\.com/i.test(text)) agents.add('Codex');
+      return Array.from(agents);
+    }
 
     function copyWebhook() {
       navigator.clipboard.writeText(webhookUrl);
@@ -185,11 +253,33 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       }
 
       const originText = [origin.device || event.payload?.delivery_source || 'GitHub remote', origin.location || 'location unknown'].join(' / ');
-      div.innerHTML = '<div class="event-header"><span class="event-type ' + typeClass + '">' + type + '</span></div><div><div class="event-title"></div><div class="event-repo"></div>' + (author ? '<div class="event-author">by ' + author + '</div>' : '') + '<div class="event-origin"></div></div><span class="event-time">' + new Date(event.receivedAt).toLocaleString() + '</span>';
+      const agents = codingAgents(event);
+      div.innerHTML = '<div class="event-header"><span class="event-type ' + typeClass + '">' + type + '</span></div><div><div class="event-title"></div><div class="event-repo"></div>' + (author ? '<div class="event-author"></div>' : '') + (agents.length ? '<div class="event-agent"></div>' : '') + '<div class="event-origin"></div></div><span class="event-time">' + new Date(event.receivedAt).toLocaleString() + '</span>';
       div.querySelector('.event-title').textContent = title;
       div.querySelector('.event-repo').textContent = repo;
+      const authorEl = div.querySelector('.event-author');
+      if (authorEl) authorEl.textContent = 'by ' + author;
+      const agentEl = div.querySelector('.event-agent');
+      if (agentEl) agentEl.textContent = 'agent: ' + agents.join(', ');
       div.querySelector('.event-origin').textContent = originText;
       return div;
+    }
+
+    function renderPageData(data) {
+      const visibleTypes = selectedTypes();
+      const events = data.events.filter((event) => visibleTypes.has(event.type || 'unknown'));
+      eventsContainer.innerHTML = '';
+      if (events.length === 0) {
+        eventsContainer.innerHTML = '<div class="empty"><div>No events match the client-side display config on this page.</div></div>';
+      } else {
+        events.forEach((event) => eventsContainer.appendChild(renderEvent(event)));
+      }
+      totalEl.textContent = data.total;
+      pageEl.textContent = data.page;
+      visibleEl.textContent = events.length;
+      pageInfoEl.textContent = 'Page ' + data.page + ' of ' + Math.max(1, Math.ceil(data.total / data.perPage));
+      prevBtn.disabled = data.page <= 1;
+      nextBtn.disabled = !data.hasMore;
     }
 
     async function loadPage(nextPage) {
@@ -197,20 +287,17 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       const res = await fetch('/api/events?page=' + nextPage + '&per_page=' + perPage);
       const data = await res.json();
       page = data.page;
-      eventsContainer.innerHTML = '';
-      if (data.events.length === 0) {
-        eventsContainer.innerHTML = '<div class="empty"><div>Waiting for events.</div></div>';
-      } else {
-        data.events.forEach((event) => eventsContainer.appendChild(renderEvent(event)));
-      }
-      totalEl.textContent = data.total;
-      pageEl.textContent = data.page;
-      visibleEl.textContent = data.events.length;
-      pageInfoEl.textContent = 'Page ' + data.page + ' of ' + Math.max(1, Math.ceil(data.total / data.perPage));
-      prevBtn.disabled = data.page <= 1;
-      nextBtn.disabled = !data.hasMore;
+      lastPageData = data;
+      renderPageData(data);
     }
 
+    syncFilterInputs();
+    filterInputs.forEach((input) => {
+      input.addEventListener('change', () => {
+        writeVisibleTypes(Array.from(selectedTypes()));
+        if (lastPageData) renderPageData(lastPageData);
+      });
+    });
     loadPage(1);
     setInterval(() => {
       if (page === 1) loadPage(1);
