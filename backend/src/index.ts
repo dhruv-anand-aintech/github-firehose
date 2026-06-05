@@ -2,6 +2,10 @@ export interface Env {
   FIREHOSE_KV: KVNamespace;
   GITHUB_WEBHOOK_SECRET: string;
   DASHBOARD_PIN: string;
+  CF_WEBHOOK_TOKEN: string;
+  GITHUB_TOKEN: string;
+  CF_API_TOKEN: string;   // for audit log polling
+  CF_ACCOUNT_ID: string;
 }
 
 const EVENTS_KEY = 'events';
@@ -71,7 +75,7 @@ function pinGateHtml(): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>GitHub Firehose</title>
+  <title>Firehose</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { min-height: 100vh; display: grid; place-items: center; background: #111317; color: #f4f0e8; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
@@ -86,7 +90,7 @@ function pinGateHtml(): string {
 </head>
 <body>
   <div class="gate">
-    <h1>GitHub Firehose</h1>
+    <h1>Firehose</h1>
     <p>Enter the 4-digit pin to open the dashboard.</p>
     <form method="POST" action="/unlock">
       <input name="pin" inputmode="numeric" maxlength="4" autocomplete="one-time-code" aria-label="Pin" />
@@ -128,7 +132,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>GitHub Firehose</title>
+  <title>Firehose</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; background: #111317; color: #f4f0e8; min-height: 100vh; }
@@ -158,6 +162,8 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     .event-type.commit { background: #16835a; }
     .event-type.pull_request { background: #8b54cb; }
     .event-type.issues { background: #bb7b16; }
+    .event-type.deploy { background: #e05a2b; }
+    .event-type.cloudflare { background: #e05a2b; }
     .event-time { font-size: 0.72rem; color: #9aa3ad; text-align: right; overflow-wrap: anywhere; }
     .event-title { font-size: 0.88rem; font-weight: 700; color: #f4f0e8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .event-repo { font-size: 0.75rem; color: #9aa3ad; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -172,7 +178,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 </head>
 <body>
   <div class="header">
-    <h1>GitHub Firehose</h1>
+    <h1>Firehose</h1>
     <div class="status"><div class="status-dot"></div><span>KV persisted</span></div>
   </div>
   <div class="container">
@@ -194,7 +200,10 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       <label class="filter-chip"><input type="checkbox" value="pull_request"> PR</label>
       <label class="filter-chip"><input type="checkbox" value="issues"> Issues</label>
       <label class="filter-chip"><input type="checkbox" value="commit"> Commit</label>
+      <label class="filter-chip"><input type="checkbox" value="deploy"> Deploy</label>
+      <label class="filter-chip"><input type="checkbox" value="create"> Create</label>
       <label class="filter-chip"><input type="checkbox" value="ping"> Ping</label>
+      <label class="filter-chip"><input type="checkbox" value="cloudflare"> Cloudflare</label>
     </div>
     <div class="events" id="events"></div>
     <div class="pager">
@@ -215,7 +224,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     const nextBtn = document.getElementById('nextBtn');
     const filterInputs = Array.from(document.querySelectorAll('.filter-chip input'));
     const configKey = 'github-firehose-visible-types';
-    const defaultVisibleTypes = ['push', 'pull_request', 'issues', 'commit'];
+    const defaultVisibleTypes = ['push', 'pull_request', 'issues', 'commit', 'deploy', 'ping', 'create', 'delete', 'cloudflare'];
     let page = 1;
     const perPage = 25;
     let lastPageData = null;
@@ -282,7 +291,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       const div = document.createElement('div');
       div.className = 'event';
       const type = event.type || 'unknown';
-      const typeClass = ['push', 'commit', 'pull_request', 'issues'].includes(type) ? type : '';
+      const typeClass = ['push', 'commit', 'pull_request', 'issues', 'deploy', 'cloudflare'].includes(type) ? type : '';
       let title = type + ' event';
       let repo = event.payload?.repository?.full_name || event.payload?.repo || 'unknown';
       let author = event.payload?.sender?.login || '';
@@ -304,6 +313,10 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
           title = event.payload.issue?.title || 'Issue event';
           author = event.payload.issue?.user?.login || author;
         }
+      } else if (event.source === 'cloudflare') {
+        title = event.payload?.name || event.payload?.text || 'Cloudflare event';
+        repo = event.payload?.data?.script_name || event.payload?.data?.worker_name || 'cloudflare';
+        author = event.payload?.data?.account_id ? 'account ' + String(event.payload.data.account_id).slice(-6) : '';
       }
 
       const originText = [origin.device || event.payload?.delivery_source || 'GitHub remote', origin.location || 'location unknown'].join(' / ');
@@ -321,7 +334,11 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 
     function renderPageData(data) {
       const visibleTypes = selectedTypes();
-      const events = data.events.filter((event) => visibleTypes.has(event.type || 'unknown'));
+      const knownTypes = new Set(['push','pull_request','issues','commit','deploy','ping','create','delete','cloudflare']);
+      const events = data.events.filter((event) => {
+        const t = event.type || 'unknown';
+        return visibleTypes.has(t) || (!knownTypes.has(t) && visibleTypes.size === defaultVisibleTypes.length);
+      });
       eventsContainer.innerHTML = '';
       if (events.length === 0) {
         eventsContainer.innerHTML = '<div class="empty"><div>No events match the client-side display config on this page.</div></div>';
@@ -360,7 +377,83 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 </body>
 </html>`;
 
+const FIREHOSE_URL = 'https://firehose.ainorthstar.tech/github-webhook';
+const CF_LAST_AUDIT_KEY = 'cf_audit_last_since';
+
+async function syncCloudflareDeployEvents(env: Env): Promise<void> {
+  if (!env.CF_API_TOKEN || !env.CF_ACCOUNT_ID) return;
+  const since = (await env.FIREHOSE_KV.get(CF_LAST_AUDIT_KEY)) || new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+  const params = new URLSearchParams({ since, action_type: 'workers.script.update', per_page: '100' });
+  const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/audit_logs?${params}`, {
+    headers: { Authorization: `Bearer ${env.CF_API_TOKEN}`, 'Content-Type': 'application/json' },
+  });
+  if (!res.ok) return;
+  const data = await res.json() as { result: Array<{ id: string; when: string; action: { type: string; result: string }; target?: { id: string; name: string }; actor?: { email: string } }>, success: boolean };
+  if (!data.success || !data.result?.length) return;
+  for (const entry of data.result) {
+    await storeEvent(env, {
+      source: 'cloudflare',
+      type: 'deploy',
+      externalId: `cf-audit-${entry.id}`,
+      receivedAt: entry.when,
+      payload: {
+        name: `Worker deployed: ${entry.target?.name || entry.target?.id || 'unknown'}`,
+        text: `${entry.action.type} → ${entry.action.result}`,
+        data: {
+          script_name: entry.target?.name || entry.target?.id,
+          account_id: env.CF_ACCOUNT_ID,
+          actor: entry.actor?.email,
+          result: entry.action.result,
+        },
+      },
+    });
+  }
+  await env.FIREHOSE_KV.put(CF_LAST_AUDIT_KEY, new Date().toISOString());
+}
+
+async function syncGithubWebhooks(env: Env): Promise<void> {
+  if (!env.GITHUB_TOKEN || !env.GITHUB_WEBHOOK_SECRET) return;
+  const headers = {
+    Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+    Accept: 'application/vnd.github+json',
+    'User-Agent': 'firehose-worker/1.0',
+  };
+  // Fetch all repos
+  let page = 1;
+  const allRepos: string[] = [];
+  while (true) {
+    const res = await fetch(`https://api.github.com/user/repos?per_page=100&page=${page}&type=owner`, { headers });
+    if (!res.ok) break;
+    const repos = await res.json() as Array<{ full_name: string }>;
+    if (!repos.length) break;
+    allRepos.push(...repos.map(r => r.full_name));
+    if (repos.length < 100) break;
+    page++;
+  }
+  // For each repo, ensure our webhook is registered
+  for (const fullName of allRepos) {
+    const hooksRes = await fetch(`https://api.github.com/repos/${fullName}/hooks`, { headers });
+    if (!hooksRes.ok) continue;
+    const hooks = await hooksRes.json() as Array<{ config: { url: string } }>;
+    if (hooks.some(h => h.config?.url === FIREHOSE_URL)) continue;
+    // Register
+    await fetch(`https://api.github.com/repos/${fullName}/hooks`, {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        config: { url: FIREHOSE_URL, content_type: 'json', secret: env.GITHUB_WEBHOOK_SECRET },
+        events: ['push', 'pull_request', 'issues', 'create'],
+        active: true,
+      }),
+    });
+  }
+}
+
 export default {
+  async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
+    await Promise.all([syncGithubWebhooks(env), syncCloudflareDeployEvents(env)]);
+  },
+
   async fetch(request: Request, env: Env): Promise<Response> {
     if (request.method === 'OPTIONS') {
       return new Response(null, { headers: corsHeaders() });
@@ -439,6 +532,27 @@ export default {
       }
       const body = (await request.json()) as FirehoseEvent;
       await storeEvent(env, body);
+      return new Response('OK', { headers: corsHeaders() });
+    }
+
+    // Manual trigger for cron sync (authenticated)
+    if (url.pathname === '/sync' && request.method === 'POST' && authenticated) {
+      await Promise.all([syncGithubWebhooks(env), syncCloudflareDeployEvents(env)]);
+      return new Response(JSON.stringify({ ok: true }), { headers: { ...corsHeaders(), 'Content-Type': 'application/json' } });
+    }
+
+    if (url.pathname === '/cloudflare-webhook' && request.method === 'POST') {
+      const token = request.headers.get('cf-webhook-auth');
+      if (!env.CF_WEBHOOK_TOKEN || token !== env.CF_WEBHOOK_TOKEN) {
+        return new Response('Unauthorized', { status: 401 });
+      }
+      const payload = await request.json() as Record<string, any>;
+      await storeEvent(env, {
+        source: 'cloudflare',
+        type: 'deploy',
+        receivedAt: new Date().toISOString(),
+        payload,
+      });
       return new Response('OK', { headers: corsHeaders() });
     }
 

@@ -6,9 +6,19 @@ compatibility_date = "2024-01-01"
 pattern = "github-firehose.ainorthstar.tech"
 custom_domain = true
 
+[[routes]]
+pattern = "firehose.ainorthstar.tech"
+custom_domain = true
+
+[triggers]
+crons = ["0 * * * *"]
+
 [vars]
 DASHBOARD_PIN = "4314"
-# GITHUB_WEBHOOK_SECRET = "your-secret-here"
+# Secrets (set via wrangler secret put):
+# GITHUB_WEBHOOK_SECRET — HMAC secret shared with GitHub webhooks
+# CF_WEBHOOK_TOKEN — token sent in cf-webhook-auth header from Cloudflare notifications
+# GITHUB_TOKEN — personal access token for cron webhook sync
 
 [[kv_namespaces]]
 binding = "FIREHOSE_KV"
