@@ -1,10 +1,12 @@
 export interface Env {
   FIREHOSE_KV: KVNamespace;
   GITHUB_WEBHOOK_SECRET: string;
+  DASHBOARD_PIN: string;
 }
 
 const EVENTS_KEY = 'events';
 const MAX_EVENTS = 5000;
+const AUTH_COOKIE = 'firehose_pin';
 
 interface FirehoseEvent {
   id?: string;
@@ -42,6 +44,58 @@ function corsHeaders(): HeadersInit {
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   };
+}
+
+function pinValue(env: Env): string {
+  return env.DASHBOARD_PIN || '4314';
+}
+
+function authCookieHeaders(pinned: boolean, secure: boolean): HeadersInit {
+  return pinned
+    ? {
+        'Set-Cookie': `${AUTH_COOKIE}=1; Path=/; HttpOnly; SameSite=Lax;${secure ? ' Secure;' : ''} Max-Age=86400`,
+      }
+    : {
+        'Set-Cookie': `${AUTH_COOKIE}=; Path=/; HttpOnly; SameSite=Lax;${secure ? ' Secure;' : ''} Max-Age=0`,
+      };
+}
+
+function isAuthenticated(request: Request): boolean {
+  const cookie = request.headers.get('cookie') || '';
+  return cookie.split(';').some((part) => part.trim() === `${AUTH_COOKIE}=1`);
+}
+
+function pinGateHtml(): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GitHub Firehose</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { min-height: 100vh; display: grid; place-items: center; background: #111317; color: #f4f0e8; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    .gate { width: min(92vw, 360px); padding: 16px; background: #181b20; border: 1px solid #2a2f36; border-radius: 10px; }
+    h1 { font-size: 1rem; margin-bottom: 10px; }
+    p { color: #9aa3ad; font-size: 0.82rem; line-height: 1.5; margin-bottom: 12px; }
+    form { display: grid; gap: 10px; }
+    input { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid #343b44; background: #0b0d10; color: #f4f0e8; font: inherit; letter-spacing: 0.2em; text-align: center; }
+    button { padding: 10px 12px; border-radius: 8px; border: 0; background: #e2b84b; color: #15120a; font: inherit; font-weight: 800; cursor: pointer; }
+    .error { min-height: 1.2em; color: #ff9b9b; font-size: 0.8rem; }
+  </style>
+</head>
+<body>
+  <div class="gate">
+    <h1>GitHub Firehose</h1>
+    <p>Enter the 4-digit pin to open the dashboard.</p>
+    <form method="POST" action="/unlock">
+      <input name="pin" inputmode="numeric" maxlength="4" autocomplete="one-time-code" aria-label="Pin" />
+      <button type="submit">Unlock</button>
+      <div class="error">${''}</div>
+    </form>
+  </div>
+</body>
+</html>`;
 }
 
 function eventTime(event: FirehoseEvent): number {
@@ -313,10 +367,43 @@ export default {
     }
 
     const url = new URL(request.url);
+    const authenticated = isAuthenticated(request);
+    const secureCookie = url.protocol === 'https:';
+
+    if (url.pathname === '/unlock' && request.method === 'POST') {
+      const form = await request.formData();
+      const pin = String(form.get('pin') || '').trim();
+      if (pin === pinValue(env)) {
+        return new Response(null, {
+          status: 302,
+          headers: {
+            ...authCookieHeaders(true, secureCookie),
+            Location: '/',
+            'Cache-Control': 'no-store',
+          },
+        });
+      }
+      return new Response(pinGateHtml(), {
+        status: 401,
+        headers: {
+          'Content-Type': 'text/html; charset=utf-8',
+          ...authCookieHeaders(false, secureCookie),
+          'Cache-Control': 'no-store',
+        },
+      });
+    }
 
     if (url.pathname === '/' || url.pathname === '/dashboard') {
+      if (!authenticated) {
+        return new Response(pinGateHtml(), {
+          headers: {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-store',
+          },
+        });
+      }
       return new Response(DASHBOARD_HTML, {
-        headers: { 'Content-Type': 'text/html' },
+        headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' },
       });
     }
 
@@ -356,6 +443,12 @@ export default {
     }
 
     if (url.pathname === '/api/events') {
+      if (!authenticated) {
+        return new Response(JSON.stringify({ error: 'unauthorized' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+        });
+      }
       const page = Math.max(1, Number(url.searchParams.get('page') || '1'));
       const perPage = Math.min(100, Math.max(1, Number(url.searchParams.get('per_page') || '25')));
       const events = (await readEvents(env)).sort((a, b) => eventTime(b) - eventTime(a));

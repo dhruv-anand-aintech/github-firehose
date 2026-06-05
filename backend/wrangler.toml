@@ -7,6 +7,7 @@ pattern = "github-firehose.ainorthstar.tech"
 custom_domain = true
 
 [vars]
+DASHBOARD_PIN = "4314"
 # GITHUB_WEBHOOK_SECRET = "your-secret-here"
 
 [[kv_namespaces]]
