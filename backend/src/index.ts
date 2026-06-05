@@ -333,21 +333,15 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     }
 
     function renderPageData(data) {
-      const visibleTypes = selectedTypes();
-      const knownTypes = new Set(['push','pull_request','issues','commit','deploy','ping','create','delete','cloudflare']);
-      const events = data.events.filter((event) => {
-        const t = event.type || 'unknown';
-        return visibleTypes.has(t) || (!knownTypes.has(t) && visibleTypes.size === defaultVisibleTypes.length);
-      });
       eventsContainer.innerHTML = '';
-      if (events.length === 0) {
-        eventsContainer.innerHTML = '<div class="empty"><div>No events match the client-side display config on this page.</div></div>';
+      if (data.events.length === 0) {
+        eventsContainer.innerHTML = '<div class="empty"><div>No events match the current filter on this page.</div></div>';
       } else {
-        events.forEach((event) => eventsContainer.appendChild(renderEvent(event)));
+        data.events.forEach((event) => eventsContainer.appendChild(renderEvent(event)));
       }
       totalEl.textContent = data.total;
       pageEl.textContent = data.page;
-      visibleEl.textContent = events.length;
+      visibleEl.textContent = data.events.length;
       pageInfoEl.textContent = 'Page ' + data.page + ' of ' + Math.max(1, Math.ceil(data.total / data.perPage));
       prevBtn.disabled = data.page <= 1;
       nextBtn.disabled = !data.hasMore;
@@ -355,7 +349,8 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 
     async function loadPage(nextPage) {
       if (nextPage < 1) return;
-      const res = await fetch('/api/events?page=' + nextPage + '&per_page=' + perPage);
+      const types = Array.from(selectedTypes()).join(',');
+      const res = await fetch('/api/events?page=' + nextPage + '&per_page=' + perPage + '&types=' + encodeURIComponent(types));
       const data = await res.json();
       page = data.page;
       lastPageData = data;
@@ -366,7 +361,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     filterInputs.forEach((input) => {
       input.addEventListener('change', () => {
         writeVisibleTypes(Array.from(selectedTypes()));
-        if (lastPageData) renderPageData(lastPageData);
+        loadPage(1);
       });
     });
     loadPage(1);
@@ -565,7 +560,12 @@ export default {
       }
       const page = Math.max(1, Number(url.searchParams.get('page') || '1'));
       const perPage = Math.min(100, Math.max(1, Number(url.searchParams.get('per_page') || '25')));
-      const events = (await readEvents(env)).sort((a, b) => eventTime(b) - eventTime(a));
+      const typesParam = url.searchParams.get('types');
+      const typeFilter = typesParam ? new Set(typesParam.split(',').map(t => t.trim()).filter(Boolean)) : null;
+      let events = (await readEvents(env)).sort((a, b) => eventTime(b) - eventTime(a));
+      if (typeFilter && typeFilter.size > 0) {
+        events = events.filter(e => typeFilter.has(e.type || 'unknown'));
+      }
       const start = (page - 1) * perPage;
       return new Response(JSON.stringify({
         events: events.slice(start, start + perPage),
