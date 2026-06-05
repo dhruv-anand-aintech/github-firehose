@@ -3,9 +3,11 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "logs": "wrangler tail"
+    "dev": "node scripts/patch-workerd-android.js && wrangler dev --remote",
+    "deploy": "node scripts/patch-workerd-android.js && wrangler deploy",
+    "logs": "node scripts/patch-workerd-android.js && wrangler tail",
+    "wrangler": "node scripts/patch-workerd-android.js && wrangler",
+    "install:android": "npm ci --ignore-scripts && node scripts/patch-workerd-android.js"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20231218.0",
