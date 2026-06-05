@@ -445,8 +445,13 @@ async function syncGithubWebhooks(env: Env): Promise<void> {
 }
 
 export default {
-  async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
-    await Promise.all([syncGithubWebhooks(env), syncCloudflareDeployEvents(env)]);
+  async scheduled(event: ScheduledEvent, env: Env): Promise<void> {
+    // "*/5 * * * *" fires every 5 min — only sync CF deploys
+    // "0 * * * *" fires hourly — also sync GitHub webhooks
+    await syncCloudflareDeployEvents(env);
+    if (event.cron === '0 * * * *') {
+      await syncGithubWebhooks(env);
+    }
   },
 
   async fetch(request: Request, env: Env): Promise<Response> {
