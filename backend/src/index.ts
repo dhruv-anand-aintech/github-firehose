@@ -314,16 +314,25 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
           author = event.payload.issue?.user?.login || author;
         }
       } else if (event.source === 'cloudflare') {
-        title = event.payload?.name || event.payload?.text || 'Cloudflare event';
-        repo = event.payload?.data?.script_name || event.payload?.data?.worker_name || 'cloudflare';
-        author = event.payload?.data?.account_id ? 'account ' + String(event.payload.data.account_id).slice(-6) : '';
+        const d = event.payload?.data || {};
+        const ok = d.success !== false;
+        title = (ok ? '✓ ' : '✗ ') + (d.script_name || event.payload?.name || 'Cloudflare deploy');
+        repo = d.deploy_url
+          ? '<a href="' + d.deploy_url + '" target="_blank" style="color:#1a0dab">' + d.deploy_url.replace(/^https?:\\/\\//, '') + '</a>'
+          : (d.script_name || 'cloudflare');
+        author = [
+          d.version_id ? 'v ' + d.version_id.slice(0, 8) : '',
+          d.duration_ms ? (d.duration_ms / 1000).toFixed(1) + 's' : '',
+          d.actor || '',
+        ].filter(Boolean).join(' · ');
       }
 
       const originText = [origin.device || event.payload?.delivery_source || 'GitHub remote', origin.location || 'location unknown'].join(' / ');
       const agents = codingAgents(event);
       div.innerHTML = '<div class="event-header"><span class="event-type ' + typeClass + '">' + type + '</span></div><div><div class="event-title"></div><div class="event-repo"></div>' + (author ? '<div class="event-author"></div>' : '') + (agents.length ? '<div class="event-agent"></div>' : '') + '<div class="event-origin"></div></div><span class="event-time">' + new Date(event.receivedAt).toLocaleString() + '</span>';
       div.querySelector('.event-title').textContent = title;
-      div.querySelector('.event-repo').textContent = repo;
+      const repoEl = div.querySelector('.event-repo');
+      if (repo.startsWith('<a ')) { repoEl.innerHTML = repo; } else { repoEl.textContent = repo; }
       const authorEl = div.querySelector('.event-author');
       if (authorEl) authorEl.textContent = 'by ' + author;
       const agentEl = div.querySelector('.event-agent');
@@ -548,13 +557,24 @@ export default {
         return new Response('Unauthorized', { status: 401 });
       }
       const worker = String(body.worker || 'unknown');
+      const deployUrl = String(body.url || '');
+      const versionId = String(body.version_id || '');
+      const success = body.success !== false;
+      const durationMs = Number(body.duration_ms || 0);
       await storeEvent(env, {
         source: 'cloudflare',
         type: 'deploy',
         receivedAt: new Date().toISOString(),
         payload: {
-          name: `Worker deployed: ${worker}`,
-          data: { script_name: worker, actor: 'wrangler-cli' },
+          name: `${success ? '✓' : '✗'} ${worker}`,
+          data: {
+            script_name: worker,
+            actor: 'wrangler-cli',
+            deploy_url: deployUrl,
+            version_id: versionId,
+            success,
+            duration_ms: durationMs,
+          },
         },
       });
       return new Response(JSON.stringify({ ok: true }), { headers: { ...corsHeaders(), 'Content-Type': 'application/json' } });
