@@ -199,6 +199,9 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     .copy-btn:disabled, .pager button:disabled { opacity: 0.45; cursor: not-allowed; }
     .events { display: grid; gap: 6px; }
     .event { display: grid; grid-template-columns: 102px minmax(0, 1fr) minmax(120px, 172px); gap: 10px; align-items: center; background: #181b20; border: 1px solid #2a2f36; border-left: 3px solid #4f5b66; border-radius: 6px; padding: 8px 10px; }
+    .event.clickable { cursor: pointer; }
+    .event.clickable:hover { background: #20242b; border-color: #4a535f; }
+    .event.clickable:focus-visible { outline: 2px solid #e2b84b; outline-offset: 2px; }
     .event-header { display: flex; align-items: center; min-width: 0; }
     .event-type { display: inline-flex; align-items: center; justify-content: center; width: 92px; padding: 4px 6px; border-radius: 4px; font-size: 0.68rem; font-weight: 800; text-transform: uppercase; background: #4f5b66; color: #fff; }
     .event-type.push { background: #2b66c3; }
@@ -212,6 +215,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     .event-repo { font-size: 0.75rem; color: #9aa3ad; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .event-author { font-size: 0.72rem; color: #d0a84b; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .event-agent { font-size: 0.72rem; color: #8fd6ff; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .event-link { font-size: 0.7rem; color: #8fd6ff; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .event-origin { font-size: 0.7rem; color: #7f8a96; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .empty { text-align: center; padding: 28px 16px; color: #9aa3ad; border: 1px dashed #3a414a; border-radius: 6px; }
     .pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; color: #9aa3ad; font-size: 0.82rem; }
@@ -330,6 +334,37 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       setTimeout(() => btn.textContent = 'Copy', 2000);
     }
 
+    function githubCommitUrl(event, commit) {
+      const repoUrl = event.payload?.repository?.html_url;
+      const sha = commit?.id || commit?.sha;
+      if (repoUrl && sha) return repoUrl + '/commit/' + sha;
+      return commit?.html_url || '';
+    }
+
+    function eventTargetUrl(event, type) {
+      if (event.source === 'github') {
+        const repoUrl = event.payload?.repository?.html_url;
+        if (type === 'push') return githubCommitUrl(event, event.payload?.head_commit) || event.payload?.compare || repoUrl || '';
+        if (type === 'commit') return event.payload?.html_url || githubCommitUrl(event, event.payload?.commit) || repoUrl || '';
+        if (type === 'pull_request') return event.payload?.pull_request?.html_url || repoUrl || '';
+        if (type === 'issues') return event.payload?.issue?.html_url || repoUrl || '';
+        if (type === 'ping') {
+          const hookId = event.payload?.hook_id || event.payload?.hook?.id;
+          return repoUrl && hookId ? repoUrl + '/settings/hooks/' + hookId : repoUrl || '';
+        }
+        return repoUrl || '';
+      }
+      if (event.source === 'cloudflare') {
+        const d = event.payload?.data || {};
+        return d.deploy_url || event.payload?.url || event.payload?.deployment_url || '';
+      }
+      return event.payload?.url || '';
+    }
+
+    function displayUrl(url) {
+      return String(url || '').replace(/^https?:\\/\\//, '');
+    }
+
     function renderEvent(event) {
       const div = document.createElement('div');
       div.className = 'event';
@@ -339,48 +374,75 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       let repo = event.payload?.repository?.full_name || event.payload?.repo || 'unknown';
       let author = event.payload?.sender?.login || '';
       let origin = event.payload?.origin || {};
+      let details = '';
 
       if (event.source === 'github') {
         if (type === 'push') {
           const commit = event.payload.head_commit;
           title = commit ? commit.message.split('\\n')[0] : 'Push to ' + (event.payload.ref || 'unknown');
           author = event.payload.pusher?.name || author;
+          const branch = String(event.payload.ref || '').replace('refs/heads/', '');
+          const sha = String(commit?.id || '').slice(0, 8);
+          const count = Array.isArray(event.payload.commits) ? event.payload.commits.length : 0;
+          details = [branch, sha ? 'commit ' + sha : '', count ? count + ' commit' + (count === 1 ? '' : 's') : ''].filter(Boolean).join(' · ');
         } else if (type === 'commit') {
           title = event.payload.commit?.message?.split('\\n')[0] || event.payload.message || 'Commit';
           repo = event.payload.repository?.full_name || repo;
           author = event.payload.commit?.author?.name || event.payload.author?.login || author;
+          details = String(event.payload.sha || event.payload.commit?.id || '').slice(0, 8);
         } else if (type === 'pull_request') {
           title = event.payload.pull_request?.title || 'PR event';
           author = event.payload.pull_request?.user?.login || author;
+          details = ['#' + event.payload.number, event.payload.action].filter(Boolean).join(' · ');
         } else if (type === 'issues') {
           title = event.payload.issue?.title || 'Issue event';
           author = event.payload.issue?.user?.login || author;
+          details = ['#' + event.payload.issue?.number, event.payload.action].filter(Boolean).join(' · ');
+        } else if (type === 'ping') {
+          title = 'Webhook ping';
+          author = event.payload.sender?.login || author;
+          details = ['hook ' + (event.payload.hook_id || event.payload.hook?.id || 'unknown'), event.payload.zen].filter(Boolean).join(' · ');
         }
       } else if (event.source === 'cloudflare') {
         const d = event.payload?.data || {};
         const ok = d.success !== false;
         title = (ok ? '✓ ' : '✗ ') + (d.script_name || event.payload?.name || 'Cloudflare deploy');
-        repo = d.deploy_url
-          ? '<a href="' + d.deploy_url + '" target="_blank" style="color:#1a0dab">' + d.deploy_url.replace(/^https?:\\/\\//, '') + '</a>'
-          : (d.script_name || 'cloudflare');
+        repo = d.deploy_url ? d.deploy_url.replace(/^https?:\\/\\//, '') : (d.script_name || 'cloudflare');
         author = [
           d.version_id ? 'v ' + d.version_id.slice(0, 8) : '',
           d.duration_ms ? (d.duration_ms / 1000).toFixed(1) + 's' : '',
           d.actor || '',
         ].filter(Boolean).join(' · ');
+        details = [d.deploy_url ? 'deployment url' : '', d.version_id || '', d.success === false ? 'failed' : 'success'].filter(Boolean).join(' · ');
       }
 
+      const targetUrl = eventTargetUrl(event, type);
       const originText = [origin.device || event.payload?.delivery_source || 'GitHub remote', origin.location || 'location unknown'].join(' / ');
       const agents = codingAgents(event);
-      div.innerHTML = '<div class="event-header"><span class="event-type ' + typeClass + '">' + type + '</span></div><div><div class="event-title"></div><div class="event-repo"></div>' + (author ? '<div class="event-author"></div>' : '') + (agents.length ? '<div class="event-agent"></div>' : '') + '<div class="event-origin"></div></div><span class="event-time">' + new Date(event.receivedAt).toLocaleString() + '</span>';
+      div.innerHTML = '<div class="event-header"><span class="event-type ' + typeClass + '">' + type + '</span></div><div><div class="event-title"></div><div class="event-repo"></div>' + (details ? '<div class="event-link"></div>' : '') + (targetUrl ? '<div class="event-link event-target"></div>' : '') + (author ? '<div class="event-author"></div>' : '') + (agents.length ? '<div class="event-agent"></div>' : '') + '<div class="event-origin"></div></div><span class="event-time">' + new Date(event.receivedAt).toLocaleString() + '</span>';
       div.querySelector('.event-title').textContent = title;
-      const repoEl = div.querySelector('.event-repo');
-      if (repo.startsWith('<a ')) { repoEl.innerHTML = repo; } else { repoEl.textContent = repo; }
+      div.querySelector('.event-repo').textContent = repo;
+      const linkEls = div.querySelectorAll('.event-link');
+      if (details) linkEls[0].textContent = details;
+      const targetEl = div.querySelector('.event-target');
+      if (targetEl) targetEl.textContent = displayUrl(targetUrl);
       const authorEl = div.querySelector('.event-author');
       if (authorEl) authorEl.textContent = 'by ' + author;
       const agentEl = div.querySelector('.event-agent');
       if (agentEl) agentEl.textContent = 'agent: ' + agents.join(', ');
       div.querySelector('.event-origin').textContent = originText;
+      if (targetUrl) {
+        div.classList.add('clickable');
+        div.tabIndex = 0;
+        div.title = 'Open ' + targetUrl;
+        div.addEventListener('click', () => window.open(targetUrl, '_blank', 'noopener'));
+        div.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            window.open(targetUrl, '_blank', 'noopener');
+          }
+        });
+      }
       return div;
     }
 
