@@ -187,3 +187,5 @@ Run checks:
 ```bash
 npx tsc --noEmit
 ```
+
+Smoke test commit: 2026-06-09T20:07:03Z.
