@@ -106,6 +106,48 @@ function eventTime(event: FirehoseEvent): number {
   return new Date(event.receivedAt || 0).getTime();
 }
 
+function cloudflareAuditAction(event: FirehoseEvent): string {
+  return String(event.payload?.data?.audit_action || event.payload?.audit_action || '');
+}
+
+function isCloudflareDeployAuditNoise(event: FirehoseEvent): boolean {
+  if (event.source !== 'cloudflare' || event.type !== 'deploy') return false;
+  if (!String(event.externalId || '').startsWith('cf-audit-')) return false;
+  return cloudflareAuditAction(event) !== 'script_deploy';
+}
+
+function eventDedupKeys(event: FirehoseEvent): string[] {
+  const keys: string[] = [];
+  if (event.externalId) keys.push(`external:${event.externalId}`);
+
+  if (event.source === 'cloudflare' && event.type === 'deploy') {
+    const data = event.payload?.data || {};
+    const script = String(data.script_name || event.payload?.worker || '').trim();
+    const version = String(data.version_id || event.payload?.version_id || '').trim();
+    if (script && version) keys.push(`cf-version:${script}:${version}`);
+  }
+
+  if (event.id) keys.push(`id:${event.id}`);
+  return keys;
+}
+
+function compactEvents(events: FirehoseEvent[]): FirehoseEvent[] {
+  const seen = new Set<string>();
+  const compacted: FirehoseEvent[] = [];
+
+  for (const event of [...events].sort((a, b) => eventTime(b) - eventTime(a))) {
+    if (isCloudflareDeployAuditNoise(event)) continue;
+
+    const keys = eventDedupKeys(event);
+    if (keys.some((key) => seen.has(key))) continue;
+
+    keys.forEach((key) => seen.add(key));
+    compacted.push(event);
+  }
+
+  return compacted;
+}
+
 async function readEvents(env: Env): Promise<FirehoseEvent[]> {
   return (await env.FIREHOSE_KV.get<FirehoseEvent[]>(EVENTS_KEY, 'json')) || [];
 }
@@ -116,10 +158,11 @@ async function storeEvent(env: Env, event: FirehoseEvent): Promise<FirehoseEvent
     id: event.id || crypto.randomUUID(),
     receivedAt: event.receivedAt || new Date().toISOString(),
   };
-  const events = await readEvents(env);
+  const events = compactEvents(await readEvents(env));
+  const enrichedKeys = eventDedupKeys(enriched);
   const deduped = events.filter((item) => {
-    if (enriched.externalId && item.externalId === enriched.externalId) return false;
-    return item.id !== enriched.id;
+    const itemKeys = eventDedupKeys(item);
+    return !itemKeys.some((key) => enrichedKeys.includes(key));
   });
   deduped.push(enriched);
   deduped.sort((a, b) => eventTime(b) - eventTime(a));
@@ -395,6 +438,7 @@ async function syncCloudflareDeployEvents(env: Env): Promise<void> {
   const data = await res.json() as { result: Array<{ id: string; when: string; action: { type: string; result: string }; target?: { id: string; name: string }; actor?: { email: string } }>, success: boolean };
   if (!data.success || !data.result?.length) return;
   for (const entry of data.result) {
+    if (entry.action.type !== 'script_deploy') continue;
     await storeEvent(env, {
       source: 'cloudflare',
       type: 'deploy',
@@ -407,6 +451,7 @@ async function syncCloudflareDeployEvents(env: Env): Promise<void> {
           script_name: entry.target?.name || entry.target?.id,
           account_id: env.CF_ACCOUNT_ID,
           actor: entry.actor?.email,
+          audit_action: entry.action.type,
           result: entry.action.result,
         },
       },
@@ -564,6 +609,7 @@ export default {
       await storeEvent(env, {
         source: 'cloudflare',
         type: 'deploy',
+        externalId: versionId ? `cf-deploy-${worker}-${versionId}` : undefined,
         receivedAt: new Date().toISOString(),
         payload: {
           name: `${success ? '✓' : '✗'} ${worker}`,
@@ -586,9 +632,13 @@ export default {
         return new Response('Unauthorized', { status: 401 });
       }
       const payload = await request.json() as Record<string, any>;
+      const data = payload.data || {};
+      const versionId = String(data.version_id || payload.version_id || '');
+      const scriptName = String(data.script_name || payload.worker || payload.name || '');
       await storeEvent(env, {
         source: 'cloudflare',
         type: 'deploy',
+        externalId: versionId && scriptName ? `cf-deploy-${scriptName}-${versionId}` : String(payload.id || payload.notification_id || ''),
         receivedAt: new Date().toISOString(),
         payload,
       });
@@ -606,7 +656,7 @@ export default {
       const perPage = Math.min(100, Math.max(1, Number(url.searchParams.get('per_page') || '25')));
       const typesParam = url.searchParams.get('types');
       const typeFilter = typesParam ? new Set(typesParam.split(',').map(t => t.trim()).filter(Boolean)) : null;
-      let events = (await readEvents(env)).sort((a, b) => eventTime(b) - eventTime(a));
+      let events = compactEvents(await readEvents(env));
       if (typeFilter && typeFilter.size > 0) {
         events = events.filter(e => typeFilter.has(e.type || 'unknown'));
       }
