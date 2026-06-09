@@ -362,6 +362,8 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     let lastPageData = null;
     let liveSocket = null;
     let liveReconnectTimer = null;
+    let liveRefreshTimer = null;
+    let liveStaleTimer = null;
     let liveReconnectDelay = 1000;
 
     function readVisibleTypes() {
@@ -572,6 +574,14 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 
     function scheduleLiveReconnect() {
       if (liveReconnectTimer) return;
+      if (liveRefreshTimer) {
+        clearInterval(liveRefreshTimer);
+        liveRefreshTimer = null;
+      }
+      if (liveStaleTimer) {
+        clearTimeout(liveStaleTimer);
+        liveStaleTimer = null;
+      }
       setLiveStatus('disconnected', 'Disconnected');
       liveReconnectTimer = setTimeout(() => {
         liveReconnectTimer = null;
@@ -585,14 +595,29 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         liveSocket.onclose = null;
         liveSocket.close();
       }
+      if (liveRefreshTimer) clearInterval(liveRefreshTimer);
+      if (liveStaleTimer) clearTimeout(liveStaleTimer);
       setLiveStatus('connecting', 'Connecting');
       const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
       liveSocket = new WebSocket(protocol + '//' + location.host + '/live?' + pageQuery(page));
       liveSocket.onopen = () => {
         liveReconnectDelay = 1000;
         setLiveStatus('connected', 'Live');
+        liveSocket.send('refresh');
+        liveRefreshTimer = setInterval(() => {
+          if (liveSocket?.readyState === WebSocket.OPEN) liveSocket.send('refresh');
+        }, 5000);
+        liveStaleTimer = setTimeout(() => {
+          liveSocket?.close();
+          scheduleLiveReconnect();
+        }, 15000);
       };
       liveSocket.onmessage = (event) => {
+        if (liveStaleTimer) clearTimeout(liveStaleTimer);
+        liveStaleTimer = setTimeout(() => {
+          liveSocket?.close();
+          scheduleLiveReconnect();
+        }, 15000);
         const message = JSON.parse(event.data);
         if (message.type === 'events') {
           page = message.data.page;
