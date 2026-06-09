@@ -170,6 +170,82 @@ async function storeEvent(env: Env, event: FirehoseEvent): Promise<FirehoseEvent
   return enriched;
 }
 
+async function eventsPage(env: Env, url: URL): Promise<{
+  events: FirehoseEvent[];
+  page: number;
+  perPage: number;
+  total: number;
+  hasMore: boolean;
+}> {
+  const page = Math.max(1, Number(url.searchParams.get('page') || '1'));
+  const perPage = Math.min(100, Math.max(1, Number(url.searchParams.get('per_page') || '25')));
+  const typesParam = url.searchParams.get('types');
+  const typeFilter = typesParam ? new Set(typesParam.split(',').map(t => t.trim()).filter(Boolean)) : null;
+  let events = compactEvents(await readEvents(env));
+  if (typeFilter && typeFilter.size > 0) {
+    events = events.filter(e => typeFilter.has(e.type || 'unknown'));
+  }
+  const start = (page - 1) * perPage;
+  return {
+    events: events.slice(start, start + perPage),
+    page,
+    perPage,
+    total: events.length,
+    hasMore: start + perPage < events.length,
+  };
+}
+
+async function liveEventsResponse(request: Request, env: Env, url: URL): Promise<Response> {
+  if (request.headers.get('Upgrade') !== 'websocket') {
+    return new Response('Expected Upgrade: websocket', { status: 426 });
+  }
+
+  const pair = new WebSocketPair();
+  const [client, server] = Object.values(pair);
+  let closed = false;
+  let lastFingerprint = '';
+  let timer: ReturnType<typeof setInterval> | undefined;
+
+  async function sendPage(force = false): Promise<void> {
+    if (closed) return;
+    try {
+      const data = await eventsPage(env, url);
+      const fingerprint = JSON.stringify({
+        page: data.page,
+        perPage: data.perPage,
+        total: data.total,
+        ids: data.events.map((event) => event.externalId || event.id || event.receivedAt),
+      });
+      if (!force && fingerprint === lastFingerprint) return;
+      lastFingerprint = fingerprint;
+      server.send(JSON.stringify({ type: 'events', data, sentAt: new Date().toISOString() }));
+    } catch (error) {
+      server.send(JSON.stringify({ type: 'error', message: error instanceof Error ? error.message : 'Live update failed' }));
+    }
+  }
+
+  server.accept();
+  server.addEventListener('message', (event) => {
+    if (event.data === 'refresh') void sendPage(true);
+  });
+  server.addEventListener('close', () => {
+    closed = true;
+    if (timer) clearInterval(timer);
+  });
+  server.addEventListener('error', () => {
+    closed = true;
+    if (timer) clearInterval(timer);
+  });
+
+  void sendPage(true);
+  timer = setInterval(() => void sendPage(), 5000);
+
+  return new Response(null, {
+    status: 101,
+    webSocket: client,
+  });
+}
+
 const DASHBOARD_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -182,7 +258,13 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     .header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; background: #181b20; border-bottom: 1px solid #2a2f36; position: sticky; top: 0; z-index: 10; }
     .header h1 { font-size: 1rem; font-weight: 700; letter-spacing: 0; }
     .status { display: flex; align-items: center; gap: 8px; padding: 4px 9px; border-radius: 6px; font-size: 0.75rem; font-weight: 700; background: #12392f; color: #b7f7d3; border: 1px solid #1f6f55; }
+    .status.disconnected { background: #402020; color: #ffc6c6; border-color: #8f3434; }
+    .status.connecting { background: #3d341c; color: #ffe3a3; border-color: #8c6a1d; }
     .status-dot { width: 6px; height: 6px; border-radius: 50%; background: #41d98b; }
+    .status.disconnected .status-dot { background: #ff6b6b; }
+    .status.connecting .status-dot { background: #f8d66d; }
+    .refresh-btn { padding: 3px 7px; border-radius: 5px; border: 1px solid currentColor; background: transparent; color: inherit; font: inherit; font-size: 0.72rem; font-weight: 800; cursor: pointer; }
+    .refresh-btn[hidden] { display: none; }
     .container { max-width: 1120px; margin: 0 auto; padding: 12px; }
     .topbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; margin-bottom: 10px; }
     .client-config { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; padding: 8px 10px; background: #181b20; border: 1px solid #2a2f36; border-radius: 6px; }
@@ -226,7 +308,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 <body>
   <div class="header">
     <h1>Firehose</h1>
-    <div class="status"><div class="status-dot"></div><span>KV persisted</span></div>
+    <div class="status connecting" id="liveStatus"><div class="status-dot"></div><span id="liveStatusText">Connecting</span><button class="refresh-btn" id="reconnectBtn" hidden>Reconnect</button></div>
   </div>
   <div class="container">
     <div class="topbar">
@@ -269,12 +351,18 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     const pageInfoEl = document.getElementById('pageInfo');
     const prevBtn = document.getElementById('prevBtn');
     const nextBtn = document.getElementById('nextBtn');
+    const liveStatus = document.getElementById('liveStatus');
+    const liveStatusText = document.getElementById('liveStatusText');
+    const reconnectBtn = document.getElementById('reconnectBtn');
     const filterInputs = Array.from(document.querySelectorAll('.filter-chip input'));
     const configKey = 'github-firehose-visible-types';
     const defaultVisibleTypes = ['push', 'pull_request', 'issues', 'commit', 'deploy', 'ping', 'create', 'delete', 'cloudflare'];
     let page = 1;
     const perPage = 25;
     let lastPageData = null;
+    let liveSocket = null;
+    let liveReconnectTimer = null;
+    let liveReconnectDelay = 1000;
 
     function readVisibleTypes() {
       try {
@@ -461,27 +549,83 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       nextBtn.disabled = !data.hasMore;
     }
 
+    function pageQuery(nextPage) {
+      const types = Array.from(selectedTypes()).join(',');
+      return 'page=' + nextPage + '&per_page=' + perPage + '&types=' + encodeURIComponent(types);
+    }
+
     async function loadPage(nextPage) {
       if (nextPage < 1) return;
-      const types = Array.from(selectedTypes()).join(',');
-      const res = await fetch('/api/events?page=' + nextPage + '&per_page=' + perPage + '&types=' + encodeURIComponent(types));
+      const res = await fetch('/api/events?' + pageQuery(nextPage));
       const data = await res.json();
       page = data.page;
       lastPageData = data;
       renderPageData(data);
     }
 
+    function setLiveStatus(state, text) {
+      liveStatus.classList.toggle('connecting', state === 'connecting');
+      liveStatus.classList.toggle('disconnected', state === 'disconnected');
+      liveStatusText.textContent = text;
+      reconnectBtn.hidden = state !== 'disconnected';
+    }
+
+    function scheduleLiveReconnect() {
+      if (liveReconnectTimer) return;
+      setLiveStatus('disconnected', 'Disconnected');
+      liveReconnectTimer = setTimeout(() => {
+        liveReconnectTimer = null;
+        connectLiveSocket();
+      }, liveReconnectDelay);
+      liveReconnectDelay = Math.min(liveReconnectDelay * 2, 15000);
+    }
+
+    function connectLiveSocket() {
+      if (liveSocket) {
+        liveSocket.onclose = null;
+        liveSocket.close();
+      }
+      setLiveStatus('connecting', 'Connecting');
+      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      liveSocket = new WebSocket(protocol + '//' + location.host + '/live?' + pageQuery(page));
+      liveSocket.onopen = () => {
+        liveReconnectDelay = 1000;
+        setLiveStatus('connected', 'Live');
+      };
+      liveSocket.onmessage = (event) => {
+        const message = JSON.parse(event.data);
+        if (message.type === 'events') {
+          page = message.data.page;
+          lastPageData = message.data;
+          renderPageData(message.data);
+        }
+      };
+      liveSocket.onerror = () => {
+        setLiveStatus('disconnected', 'Disconnected');
+      };
+      liveSocket.onclose = () => {
+        scheduleLiveReconnect();
+      };
+    }
+
     syncFilterInputs();
     filterInputs.forEach((input) => {
       input.addEventListener('change', () => {
         writeVisibleTypes(Array.from(selectedTypes()));
-        loadPage(1);
+        page = 1;
+        connectLiveSocket();
       });
     });
+    reconnectBtn.addEventListener('click', () => {
+      if (liveReconnectTimer) {
+        clearTimeout(liveReconnectTimer);
+        liveReconnectTimer = null;
+      }
+      liveReconnectDelay = 1000;
+      connectLiveSocket();
+    });
     loadPage(1);
-    setInterval(() => {
-      if (page === 1) loadPage(1);
-    }, 10000);
+    connectLiveSocket();
   </script>
 </body>
 </html>`;
@@ -616,6 +760,13 @@ export default {
       });
     }
 
+    if (url.pathname === '/live') {
+      if (!authenticated) {
+        return new Response('Unauthorized', { status: 401 });
+      }
+      return liveEventsResponse(request, env, url);
+    }
+
     if (url.pathname === '/github-webhook') {
       const signature = request.headers.get('x-hub-signature-256');
       const body = await request.text();
@@ -714,22 +865,7 @@ export default {
           headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
         });
       }
-      const page = Math.max(1, Number(url.searchParams.get('page') || '1'));
-      const perPage = Math.min(100, Math.max(1, Number(url.searchParams.get('per_page') || '25')));
-      const typesParam = url.searchParams.get('types');
-      const typeFilter = typesParam ? new Set(typesParam.split(',').map(t => t.trim()).filter(Boolean)) : null;
-      let events = compactEvents(await readEvents(env));
-      if (typeFilter && typeFilter.size > 0) {
-        events = events.filter(e => typeFilter.has(e.type || 'unknown'));
-      }
-      const start = (page - 1) * perPage;
-      return new Response(JSON.stringify({
-        events: events.slice(start, start + perPage),
-        page,
-        perPage,
-        total: events.length,
-        hasMore: start + perPage < events.length,
-      }), {
+      return new Response(JSON.stringify(await eventsPage(env, url)), {
         headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
       });
     }
