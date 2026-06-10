@@ -177,8 +177,12 @@ async function eventsPage(env: Env, url: URL): Promise<{
   total: number;
   hasMore: boolean;
 }> {
-  const page = Math.max(1, Number(url.searchParams.get('page') || '1'));
-  const perPage = Math.min(100, Math.max(1, Number(url.searchParams.get('per_page') || '25')));
+  const positiveIntParam = (name: string, fallback: number): number => {
+    const value = Number(url.searchParams.get(name) || fallback);
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+  };
+  const page = positiveIntParam('page', 1);
+  const perPage = Math.min(100, positiveIntParam('per_page', 25));
   const typesParam = url.searchParams.get('types');
   const typeFilter = typesParam ? new Set(typesParam.split(',').map(t => t.trim()).filter(Boolean)) : null;
   let events = compactEvents(await readEvents(env));

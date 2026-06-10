@@ -10,7 +10,7 @@ import {
   StatusBar,
 } from 'react-native';
 
-const WS_URL = 'wss://your-worker-url/websocket';
+const WS_URL = 'wss://your-worker-url/live';
 const API_URL = 'https://your-worker-url/api/events';
 
 interface FirehoseEvent {
@@ -21,18 +21,25 @@ interface FirehoseEvent {
   payload: any;
 }
 
+interface EventsPage {
+  events: FirehoseEvent[];
+  total: number;
+}
+
 export default function App() {
   const [events, setEvents] = useState<FirehoseEvent[]>([]);
   const [connected, setConnected] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [total, setTotal] = useState(0);
   const wsRef = useRef<WebSocket | null>(null);
-  const totalRef = useRef(0);
 
   useEffect(() => {
     fetch(API_URL)
       .then((res) => res.json())
-      .then((data) => {
-        setEvents(data.slice(0, 50));
+      .then((data: EventsPage) => {
+        const nextEvents = (data.events || []).slice(0, 50);
+        setEvents(nextEvents);
+        setTotal(data.total ?? nextEvents.length);
         setLoading(false);
       })
       .catch((err) => {
@@ -56,10 +63,11 @@ export default function App() {
 
       ws.onmessage = (e) => {
         const message = JSON.parse(e.data);
-        if (message.type === 'event') {
-          const event = message.data;
-          totalRef.current += 1;
-          setEvents((prev) => [event, ...prev].slice(0, 100));
+        if (message.type === 'events') {
+          const page = message.data as EventsPage;
+          const nextEvents = (page.events || []).slice(0, 100);
+          setEvents(nextEvents);
+          setTotal(page.total ?? nextEvents.length);
         }
       };
     };
@@ -138,7 +146,7 @@ export default function App() {
           <Text style={styles.statLabel}>Events</Text>
         </View>
         <View style={styles.stat}>
-          <Text style={styles.statValue}>{totalRef.current}</Text>
+          <Text style={styles.statValue}>{total}</Text>
           <Text style={styles.statLabel}>Total</Text>
         </View>
         <View style={styles.stat}>

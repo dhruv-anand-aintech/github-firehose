@@ -20,7 +20,7 @@ const getWsUrl = () => {
   const base = getBaseUrl();
   if (!base) return '';
   const protocol = base.startsWith('https') ? 'wss' : 'ws';
-  return base.replace(/^http/, protocol) + '/websocket';
+  return base.replace(/^http/, protocol) + '/live';
 };
 
 const API_URL = `${getBaseUrl()}/api/events`;
@@ -34,12 +34,17 @@ interface FirehoseEvent {
   payload: any;
 }
 
+interface EventsPage {
+  events: FirehoseEvent[];
+  total: number;
+}
+
 export default function App() {
   const [events, setEvents] = useState<FirehoseEvent[]>([]);
   const [connected, setConnected] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [total, setTotal] = useState(0);
   const wsRef = useRef<WebSocket | null>(null);
-  const totalRef = useRef(0);
   const eventsRef = useRef<FirehoseEvent[]>([]);
 
   const connectWebSocket = useCallback(() => {
@@ -60,13 +65,11 @@ export default function App() {
 
     ws.onmessage = (e) => {
       const message = JSON.parse(e.data);
-      if (message.type === 'event') {
-        const event = message.data;
-        totalRef.current += 1;
-        eventsRef.current = [event, ...eventsRef.current].slice(0, 100);
+      if (message.type === 'events') {
+        const page = message.data as EventsPage;
+        eventsRef.current = (page.events || []).slice(0, 100);
         setEvents([...eventsRef.current]);
-      } else if (message.type === 'stats') {
-        // Handle stats if needed
+        setTotal(page.total ?? eventsRef.current.length);
       }
     };
   }, []);
@@ -74,9 +77,10 @@ export default function App() {
   useEffect(() => {
     fetch(API_URL)
       .then((res) => res.json())
-      .then((data) => {
-        eventsRef.current = data.slice(0, 50);
+      .then((data: EventsPage) => {
+        eventsRef.current = (data.events || []).slice(0, 50);
         setEvents(eventsRef.current);
+        setTotal(data.total ?? eventsRef.current.length);
         setLoading(false);
       })
       .catch((err) => {
@@ -158,7 +162,7 @@ export default function App() {
           <Text style={styles.statLabel}>Events</Text>
         </View>
         <View style={styles.stat}>
-          <Text style={styles.statValue}>{totalRef.current}</Text>
+          <Text style={styles.statValue}>{total}</Text>
           <Text style={styles.statLabel}>Total</Text>
         </View>
         <View style={styles.stat}>
