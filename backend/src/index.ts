@@ -323,8 +323,8 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       </div>
       <div class="stats">
         <div class="stat-card"><div class="label">Total</div><div class="value" id="totalEvents">0</div></div>
-        <div class="stat-card"><div class="label">Page</div><div class="value" id="pageValue">1</div></div>
-        <div class="stat-card"><div class="label">Visible</div><div class="value" id="visibleEvents">0</div></div>
+        <div class="stat-card"><div class="label">Head</div><div class="value" id="headCount">0</div></div>
+        <div class="stat-card"><div class="label">Loaded</div><div class="value" id="loadedCount">0</div></div>
       </div>
     </div>
     <div class="client-config">
@@ -337,12 +337,11 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       <label class="filter-chip"><input type="checkbox" value="create"> Create</label>
       <label class="filter-chip"><input type="checkbox" value="ping"> Ping</label>
       <label class="filter-chip"><input type="checkbox" value="cloudflare"> Cloudflare</label>
+      <button class="copy-btn" id="deselectAllBtn" style="margin-top:0;padding:4px 10px;font-size:0.72rem;">Deselect All</button>
     </div>
     <div class="events" id="events"></div>
-    <div class="pager">
-      <button id="prevBtn" onclick="loadPage(page - 1)">Previous</button>
-      <span id="pageInfo">Page 1</span>
-      <button id="nextBtn" onclick="loadPage(page + 1)">Next</button>
+    <div class="pager" id="loadMoreContainer">
+      <button id="loadMoreBtn" onclick="loadMore()">Load More</button>
     </div>
   </div>
   <script>
@@ -350,20 +349,22 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     document.getElementById('webhookUrl').textContent = webhookUrl;
     const eventsContainer = document.getElementById('events');
     const totalEl = document.getElementById('totalEvents');
-    const pageEl = document.getElementById('pageValue');
-    const visibleEl = document.getElementById('visibleEvents');
-    const pageInfoEl = document.getElementById('pageInfo');
-    const prevBtn = document.getElementById('prevBtn');
-    const nextBtn = document.getElementById('nextBtn');
+    const headCountEl = document.getElementById('headCount');
+    const loadedEl = document.getElementById('loadedCount');
+    const loadMoreBtn = document.getElementById('loadMoreBtn');
     const liveStatus = document.getElementById('liveStatus');
     const liveStatusText = document.getElementById('liveStatusText');
     const reconnectBtn = document.getElementById('reconnectBtn');
     const filterInputs = Array.from(document.querySelectorAll('.filter-chip input'));
+    const deselectAllBtn = document.getElementById('deselectAllBtn');
     const configKey = 'github-firehose-visible-types';
     const defaultVisibleTypes = ['push', 'pull_request', 'issues', 'commit', 'deploy', 'ping', 'create', 'delete', 'cloudflare'];
-    let page = 1;
     const perPage = 25;
-    let lastPageData = null;
+    let headEvents = [];
+    let tailEvents = [];
+    let tailPage = 0;
+    let tailHasMore = false;
+    let totalEvents = 0;
     let liveSocket = null;
     let liveReconnectTimer = null;
     let liveRefreshTimer = null;
@@ -392,6 +393,10 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 
     function selectedTypes() {
       return new Set(filterInputs.filter((input) => input.checked).map((input) => input.value));
+    }
+
+    function typesQuery() {
+      return Array.from(selectedTypes()).join(',');
     }
 
     function commitText(event) {
@@ -423,7 +428,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 
     function copyWebhook() {
       navigator.clipboard.writeText(webhookUrl);
-      const btn = document.querySelector('.copy-btn');
+      const btn = document.querySelector('.config .copy-btn');
       btn.textContent = 'Copied!';
       setTimeout(() => btn.textContent = 'Copy', 2000);
     }
@@ -544,33 +549,27 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       return div;
     }
 
-    function renderPageData(data) {
-      eventsContainer.innerHTML = '';
-      if (data.events.length === 0) {
-        eventsContainer.innerHTML = '<div class="empty"><div>No events match the current filter on this page.</div></div>';
-      } else {
-        data.events.forEach((event) => eventsContainer.appendChild(renderEvent(event)));
+    function renderEvents() {
+      const seen = new Set();
+      const events = [];
+      for (const event of [...headEvents, ...tailEvents]) {
+        const id = event.id || event.externalId || event.receivedAt;
+        if (!seen.has(id)) {
+          seen.add(id);
+          events.push(event);
+        }
       }
-      totalEl.textContent = data.total;
-      pageEl.textContent = data.page;
-      visibleEl.textContent = data.events.length;
-      pageInfoEl.textContent = 'Page ' + data.page + ' of ' + Math.max(1, Math.ceil(data.total / data.perPage));
-      prevBtn.disabled = data.page <= 1;
-      nextBtn.disabled = !data.hasMore;
-    }
-
-    function pageQuery(nextPage) {
-      const types = Array.from(selectedTypes()).join(',');
-      return 'page=' + nextPage + '&per_page=' + perPage + '&types=' + encodeURIComponent(types);
-    }
-
-    async function loadPage(nextPage) {
-      if (nextPage < 1) return;
-      const res = await fetch('/api/events?' + pageQuery(nextPage));
-      const data = await res.json();
-      page = data.page;
-      lastPageData = data;
-      renderPageData(data);
+      eventsContainer.innerHTML = '';
+      if (events.length === 0) {
+        eventsContainer.innerHTML = '<div class="empty"><div>No events match the current filter.</div></div>';
+      } else {
+        events.forEach((event) => eventsContainer.appendChild(renderEvent(event)));
+      }
+      totalEl.textContent = totalEvents;
+      headCountEl.textContent = headEvents.length;
+      loadedEl.textContent = events.length;
+      loadMoreBtn.disabled = !tailHasMore;
+      loadMoreBtn.textContent = tailHasMore ? 'Load More' : 'No more events';
     }
 
     function setLiveStatus(state, text) {
@@ -607,7 +606,9 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       if (liveStaleTimer) clearTimeout(liveStaleTimer);
       setLiveStatus('connecting', 'Connecting');
       const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      liveSocket = new WebSocket(protocol + '//' + location.host + '/live?' + pageQuery(page));
+      const types = typesQuery();
+      const wsUrl = protocol + '//' + location.host + '/live?page=1&per_page=' + perPage + '&types=' + encodeURIComponent(types);
+      liveSocket = new WebSocket(wsUrl);
       liveSocket.onopen = () => {
         liveReconnectDelay = 1000;
         setLiveStatus('connected', 'Live');
@@ -628,9 +629,12 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         }, 15000);
         const message = JSON.parse(event.data);
         if (message.type === 'events') {
-          page = message.data.page;
-          lastPageData = message.data;
-          renderPageData(message.data);
+          headEvents = message.data.events || [];
+          totalEvents = message.data.total ?? headEvents.length;
+          if (tailPage === 0) {
+            tailHasMore = message.data.hasMore;
+          }
+          renderEvents();
         }
       };
       liveSocket.onerror = () => {
@@ -641,13 +645,40 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       };
     }
 
+    async function loadMore() {
+      if (!tailHasMore) return;
+      let nextPage = tailPage + 1;
+      if (nextPage === 1) nextPage = 2;
+      const types = typesQuery();
+      const res = await fetch('/api/events?page=' + nextPage + '&per_page=' + perPage + '&types=' + encodeURIComponent(types));
+      const data = await res.json();
+      tailPage = data.page;
+      tailEvents.push(...data.events);
+      tailHasMore = data.hasMore;
+      renderEvents();
+    }
+
+    function resetTail() {
+      tailEvents = [];
+      tailPage = 0;
+      tailHasMore = false;
+    }
+
+    function applyFilters() {
+      writeVisibleTypes(Array.from(selectedTypes()));
+      resetTail();
+      connectLiveSocket();
+    }
+
     syncFilterInputs();
     filterInputs.forEach((input) => {
-      input.addEventListener('change', () => {
-        writeVisibleTypes(Array.from(selectedTypes()));
-        page = 1;
-        connectLiveSocket();
+      input.addEventListener('change', () => applyFilters());
+    });
+    deselectAllBtn.addEventListener('click', () => {
+      filterInputs.forEach((input) => {
+        input.checked = false;
       });
+      applyFilters();
     });
     reconnectBtn.addEventListener('click', () => {
       if (liveReconnectTimer) {
@@ -657,7 +688,6 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       liveReconnectDelay = 1000;
       connectLiveSocket();
     });
-    loadPage(1);
     connectLiveSocket();
   </script>
 </body>
@@ -852,6 +882,7 @@ export default {
       const versionId = String(body.version_id || '');
       const success = body.success !== false;
       const durationMs = Number(body.duration_ms || 0);
+      const cwd = String(body.cwd || '');
       await storeEvent(env, {
         source: 'cloudflare',
         type: 'deploy',
@@ -859,6 +890,10 @@ export default {
         receivedAt: new Date().toISOString(),
         payload: {
           name: `${success ? '✓' : '✗'} ${worker}`,
+          origin: {
+            device: 'wrangler-cli',
+            location: cwd || 'unknown',
+          },
           data: {
             script_name: worker,
             actor: 'wrangler-cli',
