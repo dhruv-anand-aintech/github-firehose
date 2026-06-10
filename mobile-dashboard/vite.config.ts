@@ -17,7 +17,7 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': 'http://localhost:8787',
-      '/websocket': 'ws://localhost:8787',
+      '/live': 'ws://localhost:8787',
       '/github-webhook': 'http://localhost:8787',
     }
   }

@@ -177,8 +177,12 @@ async function eventsPage(env: Env, url: URL): Promise<{
   total: number;
   hasMore: boolean;
 }> {
-  const page = Math.max(1, Number(url.searchParams.get('page') || '1'));
-  const perPage = Math.min(100, Math.max(1, Number(url.searchParams.get('per_page') || '25')));
+  const positiveIntParam = (name: string, fallback: number): number => {
+    const value = Number(url.searchParams.get(name) || fallback);
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+  };
+  const page = positiveIntParam('page', 1);
+  const perPage = Math.min(100, positiveIntParam('per_page', 25));
   const typesParam = url.searchParams.get('types');
   const typeFilter = typesParam ? new Set(typesParam.split(',').map(t => t.trim()).filter(Boolean)) : null;
   let events = compactEvents(await readEvents(env));
@@ -509,7 +513,11 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       const targetUrl = eventTargetUrl(event, type);
       const originText = [origin.device || event.payload?.delivery_source || 'GitHub remote', origin.location || 'location unknown'].join(' / ');
       const agents = codingAgents(event);
-      div.innerHTML = '<div class="event-header"><span class="event-type ' + typeClass + '">' + type + '</span></div><div><div class="event-title"></div><div class="event-repo"></div>' + (details ? '<div class="event-link"></div>' : '') + (targetUrl ? '<div class="event-link event-target"></div>' : '') + (author ? '<div class="event-author"></div>' : '') + (agents.length ? '<div class="event-agent"></div>' : '') + '<div class="event-origin"></div></div><span class="event-time">' + new Date(event.receivedAt).toLocaleString() + '</span>';
+      div.innerHTML = '<div class="event-header"><span class="event-type"></span></div><div><div class="event-title"></div><div class="event-repo"></div>' + (details ? '<div class="event-link"></div>' : '') + (targetUrl ? '<div class="event-link event-target"></div>' : '') + (author ? '<div class="event-author"></div>' : '') + (agents.length ? '<div class="event-agent"></div>' : '') + '<div class="event-origin"></div></div><span class="event-time"></span>';
+      const typeEl = div.querySelector('.event-type');
+      typeEl.className = 'event-type' + (typeClass ? ' ' + typeClass : '');
+      typeEl.textContent = type;
+      div.querySelector('.event-time').textContent = new Date(event.receivedAt).toLocaleString();
       div.querySelector('.event-title').textContent = title;
       div.querySelector('.event-repo').textContent = repo;
       const linkEls = div.querySelectorAll('.event-link');

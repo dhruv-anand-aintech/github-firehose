@@ -130,7 +130,7 @@ if [ -n "$SUBDOMAIN" ]; then
   echo "Dashboard:     ${WORKER_URL}/"
   echo "Webhook URL:   ${WORKER_URL}/github-webhook"
   echo "API:           ${WORKER_URL}/api/events"
-  echo "WebSocket:     wss://${SCRIPT_NAME}.${SUBDOMAIN}.workers.dev/websocket"
+  echo "WebSocket:     wss://${SCRIPT_NAME}.${SUBDOMAIN}.workers.dev/live"
   echo ""
   echo "GITHUB_WEBHOOK_SECRET: ${WEBHOOK_SECRET}"
   echo ""
@@ -145,7 +145,7 @@ if [ -n "$SUBDOMAIN" ]; then
   echo "If you're running the local dashboard, it connects to localhost:8787 by default."
   echo "To point it at the deployed worker, set these in the dashboard or mobile app:"
   echo "  API:  ${WORKER_URL}/api/events"
-  echo "  WS:   wss://${SCRIPT_NAME}.${SUBDOMAIN}.workers.dev/websocket"
+  echo "  WS:   wss://${SCRIPT_NAME}.${SUBDOMAIN}.workers.dev/live"
   echo "=============================================="
 else
   echo "Worker deployed but could not determine subdomain."

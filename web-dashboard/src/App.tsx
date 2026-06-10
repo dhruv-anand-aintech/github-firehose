@@ -9,8 +9,18 @@ interface FirehoseEvent {
   payload: any
 }
 
-const WS_URL = `${import.meta.env.DEV ? 'ws://localhost:8787' : `wss://${location.host}`}/websocket`
+interface EventsPage {
+  events: FirehoseEvent[]
+  total: number
+}
+
+const WS_URL = `${import.meta.env.DEV ? 'ws://localhost:8787' : `wss://${location.host}`}/live`
 const API_URL = `${import.meta.env.DEV ? 'http://localhost:8787' : location.origin}/api/events`
+
+const recentEventCount = (events: FirehoseEvent[]) => {
+  const cutoff = Date.now() - 60000
+  return events.filter((event) => new Date(event.receivedAt).getTime() >= cutoff).length
+}
 
 function App() {
   const [events, setEvents] = useState<FirehoseEvent[]>([])
@@ -23,7 +33,12 @@ function App() {
   useEffect(() => {
     fetch(API_URL)
       .then((r) => r.json())
-      .then((data) => setEvents(data.slice(0, 50)))
+      .then((data: EventsPage) => {
+        const nextEvents = (data.events || []).slice(0, 50)
+        setEvents(nextEvents)
+        setTotal(data.total ?? nextEvents.length)
+        setPerMin(recentEventCount(nextEvents))
+      })
       .catch(console.error)
 
     const connect = () => {
@@ -38,11 +53,12 @@ function App() {
       ws.onerror = () => ws.close()
       ws.onmessage = (e) => {
         const msg = JSON.parse(e.data)
-        if (msg.type === 'event') {
-          const evt = msg.data
-          setEvents((prev) => [evt, ...prev].slice(0, 100))
-          setTotal((t) => t + 1)
-          eventsRef.current.push({ time: Date.now() })
+        if (msg.type === 'events') {
+          const page = msg.data as EventsPage
+          const nextEvents = (page.events || []).slice(0, 100)
+          setEvents(nextEvents)
+          setTotal(page.total ?? nextEvents.length)
+          eventsRef.current = nextEvents.map((event) => ({ time: new Date(event.receivedAt).getTime() || Date.now() }))
           eventsRef.current = eventsRef.current.filter((x) => Date.now() - x.time < 60000)
           setPerMin(eventsRef.current.length)
         }
