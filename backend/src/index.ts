@@ -926,6 +926,31 @@ export default {
       return new Response('OK', { headers: corsHeaders() });
     }
 
+    if (url.pathname === '/local-notify' && request.method === 'POST') {
+      const body = await request.json() as Record<string, any>;
+      const pin = String(body.pin || '').trim();
+      if (pin !== pinValue(env)) {
+        return new Response('Unauthorized', { status: 401 });
+      }
+      const source = String(body.source || 'local');
+      const type = String(body.type || 'unknown');
+      const cwd = String(body.cwd || '');
+      const payload = body.payload || {};
+      await storeEvent(env, {
+        source,
+        type,
+        receivedAt: new Date().toISOString(),
+        payload: {
+          ...payload,
+          origin: {
+            device: source,
+            location: cwd || 'unknown',
+          },
+        },
+      });
+      return new Response(JSON.stringify({ ok: true }), { headers: { ...corsHeaders(), 'Content-Type': 'application/json' } });
+    }
+
     if (url.pathname === '/api/events') {
       if (!authenticated) {
         return new Response(JSON.stringify({ error: 'unauthorized' }), {
