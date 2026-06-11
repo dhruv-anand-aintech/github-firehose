@@ -305,13 +305,16 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     .event-type.issues { background: #bb7b16; }
     .event-type.deploy { background: #e05a2b; }
     .event-type.cloudflare { background: #e05a2b; }
+    .event-main { min-width: 0; overflow-wrap: anywhere; }
     .event-time { font-size: 0.72rem; color: #9aa3ad; text-align: right; overflow-wrap: anywhere; }
-    .event-title { font-size: 0.88rem; font-weight: 700; color: #f4f0e8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .event-repo { font-size: 0.75rem; color: #9aa3ad; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .event-author { font-size: 0.72rem; color: #d0a84b; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .event-agent { font-size: 0.72rem; color: #8fd6ff; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .event-link { font-size: 0.7rem; color: #8fd6ff; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .event-origin { font-size: 0.7rem; color: #7f8a96; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .event-title { font-size: 0.88rem; font-weight: 700; color: #f4f0e8; overflow-wrap: anywhere; line-height: 1.35; }
+    .event-repo { font-size: 0.75rem; color: #9aa3ad; overflow-wrap: anywhere; line-height: 1.35; }
+    .event-author { font-size: 0.72rem; color: #d0a84b; margin-top: 2px; overflow-wrap: anywhere; line-height: 1.35; }
+    .event-agent { font-size: 0.72rem; color: #8fd6ff; margin-top: 2px; overflow-wrap: anywhere; line-height: 1.35; }
+    .event-link { display: block; font-size: 0.7rem; color: #8fd6ff; margin-top: 2px; overflow-wrap: anywhere; line-height: 1.35; }
+    a.event-link { text-decoration: none; }
+    a.event-link:hover { text-decoration: underline; }
+    .event-origin { font-size: 0.7rem; color: #7f8a96; margin-top: 2px; overflow-wrap: anywhere; line-height: 1.35; }
     .empty { text-align: center; padding: 28px 16px; color: #9aa3ad; border: 1px dashed #3a414a; border-radius: 6px; }
     .pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; color: #9aa3ad; font-size: 0.82rem; }
     @media (max-width: 760px) { .topbar { grid-template-columns: 1fr; } .event { grid-template-columns: 88px minmax(0, 1fr); } .event-time { grid-column: 1 / -1; text-align: left; white-space: normal; } .event-type { width: 78px; } }
@@ -527,7 +530,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       const targetUrl = eventTargetUrl(event, type);
       const originText = [origin.device || event.payload?.delivery_source || 'GitHub remote', origin.location || 'location unknown'].join(' / ');
       const agents = codingAgents(event);
-      div.innerHTML = '<div class="event-header"><span class="event-type"></span></div><div><div class="event-title"></div><div class="event-repo"></div>' + (details ? '<div class="event-link"></div>' : '') + (targetUrl ? '<div class="event-link event-target"></div>' : '') + (author ? '<div class="event-author"></div>' : '') + (agents.length ? '<div class="event-agent"></div>' : '') + '<div class="event-origin"></div></div><span class="event-time"></span>';
+      div.innerHTML = '<div class="event-header"><span class="event-type"></span></div><div class="event-main"><div class="event-title"></div><div class="event-repo"></div>' + (details ? '<div class="event-link"></div>' : '') + (targetUrl ? '<a class="event-link event-target" target="_blank" rel="noopener"></a>' : '') + (author ? '<div class="event-author"></div>' : '') + (agents.length ? '<div class="event-agent"></div>' : '') + '<div class="event-origin"></div></div><span class="event-time"></span>';
       const typeEl = div.querySelector('.event-type');
       typeEl.className = 'event-type' + (typeClass ? ' ' + typeClass : '');
       typeEl.textContent = type;
@@ -537,7 +540,10 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       const linkEls = div.querySelectorAll('.event-link');
       if (details) linkEls[0].textContent = details;
       const targetEl = div.querySelector('.event-target');
-      if (targetEl) targetEl.textContent = displayUrl(targetUrl);
+      if (targetEl) {
+        targetEl.textContent = displayUrl(targetUrl);
+        targetEl.setAttribute('href', targetUrl);
+      }
       const authorEl = div.querySelector('.event-author');
       if (authorEl) authorEl.textContent = 'by ' + author;
       const agentEl = div.querySelector('.event-agent');
@@ -547,7 +553,10 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         div.classList.add('clickable');
         div.tabIndex = 0;
         div.title = 'Open ' + targetUrl;
-        div.addEventListener('click', () => window.open(targetUrl, '_blank', 'noopener'));
+        div.addEventListener('click', (event) => {
+          if (event.target?.closest?.('a')) return;
+          window.open(targetUrl, '_blank', 'noopener');
+        });
         div.addEventListener('keydown', (event) => {
           if (event.key === 'Enter' || event.key === ' ') {
             event.preventDefault();
