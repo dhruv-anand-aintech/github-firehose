@@ -11,6 +11,8 @@ export interface Env {
 const EVENTS_KEY = 'events';
 const MAX_EVENTS = 5000;
 const AUTH_COOKIE = 'firehose_pin';
+const CANONICAL_HOST = 'firehose.ainorthstar.tech';
+const LEGACY_HOST = 'github-firehose.ainorthstar.tech';
 const PWA = {
   name: 'GitHub Firehose',
   shortName: 'Firehose',
@@ -838,6 +840,11 @@ export default {
     }
 
     const url = new URL(request.url);
+    if (url.hostname === LEGACY_HOST) {
+      url.hostname = CANONICAL_HOST;
+      return Response.redirect(url.toString(), 308);
+    }
+
     const pwa = pwaAsset(url);
     if (pwa) return pwa;
     const authenticated = isAuthenticated(request);
