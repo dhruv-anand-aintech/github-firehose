@@ -11,6 +11,13 @@ export interface Env {
 const EVENTS_KEY = 'events';
 const MAX_EVENTS = 5000;
 const AUTH_COOKIE = 'firehose_pin';
+const PWA = {
+  name: 'GitHub Firehose',
+  shortName: 'Firehose',
+  themeColor: '#181b20',
+  backgroundColor: '#111317',
+  label: 'FH',
+};
 
 interface FirehoseEvent {
   id?: string;
@@ -75,6 +82,7 @@ function pinGateHtml(): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  ${pwaHead()}
   <title>Firehose</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -255,6 +263,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  ${pwaHead()}
   <title>Firehose</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -689,9 +698,46 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       connectLiveSocket();
     });
     connectLiveSocket();
-  </script>
+</script>
+${pwaScript()}
 </body>
 </html>`;
+
+function pwaHead(): string {
+  return `<meta name="theme-color" content="${PWA.themeColor}">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="apple-touch-icon" href="/pwa-icon.svg">`;
+}
+
+function pwaScript(): string {
+  return `<script>
+if ('serviceWorker' in navigator) window.addEventListener('load', function(){ navigator.serviceWorker.register('/sw.js').catch(function(){}); });
+</script>`;
+}
+
+function pwaManifest(): string {
+  return JSON.stringify({
+    name: PWA.name,
+    short_name: PWA.shortName,
+    start_url: '/',
+    scope: '/',
+    display: 'standalone',
+    background_color: PWA.backgroundColor,
+    theme_color: PWA.themeColor,
+    icons: [{ src: '/pwa-icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any maskable' }],
+  });
+}
+
+function pwaIcon(): string {
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="96" fill="${PWA.themeColor}"/><text x="256" y="286" text-anchor="middle" font-family="Arial,sans-serif" font-size="150" font-weight="800" fill="#f4f0e8">${PWA.label}</text></svg>`;
+}
+
+function pwaAsset(url: URL): Response | null {
+  if (url.pathname === '/manifest.json') return new Response(pwaManifest(), { headers: { 'Content-Type': 'application/manifest+json; charset=utf-8', 'Cache-Control': 'public, max-age=300' } });
+  if (url.pathname === '/pwa-icon.svg') return new Response(pwaIcon(), { headers: { 'Content-Type': 'image/svg+xml; charset=utf-8', 'Cache-Control': 'public, max-age=86400' } });
+  if (url.pathname === '/sw.js') return new Response("self.addEventListener('install',()=>self.skipWaiting());self.addEventListener('activate',e=>e.waitUntil(self.clients.claim()));", { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-cache' } });
+  return null;
+}
 
 const FIREHOSE_URL = 'https://firehose.ainorthstar.tech/github-webhook';
 const CF_LAST_AUDIT_KEY = 'cf_audit_last_since';
@@ -783,6 +829,8 @@ export default {
     }
 
     const url = new URL(request.url);
+    const pwa = pwaAsset(url);
+    if (pwa) return pwa;
     const authenticated = isAuthenticated(request);
     const secureCookie = url.protocol === 'https:';
 
