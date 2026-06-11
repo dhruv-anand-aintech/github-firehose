@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { type KeyboardEvent, useEffect, useRef, useState } from 'react'
 import './App.css'
 
 interface FirehoseEvent {
@@ -20,6 +20,25 @@ const API_URL = `${import.meta.env.DEV ? 'http://localhost:8787' : location.orig
 const recentEventCount = (events: FirehoseEvent[]) => {
   const cutoff = Date.now() - 60000
   return events.filter((event) => new Date(event.receivedAt).getTime() >= cutoff).length
+}
+
+const githubCommitUrl = (event: FirehoseEvent, commit: any) => {
+  const repoUrl = event.payload?.repository?.html_url
+  const sha = commit?.id || commit?.sha
+  if (repoUrl && sha) return `${repoUrl}/commit/${sha}`
+  return commit?.html_url || ''
+}
+
+const eventTargetUrl = (event: FirehoseEvent, type: string) => {
+  if (event.source === 'github') {
+    const repoUrl = event.payload?.repository?.html_url
+    if (type === 'push') return githubCommitUrl(event, event.payload?.head_commit) || event.payload?.compare || repoUrl || ''
+    if (type === 'commit') return event.payload?.html_url || githubCommitUrl(event, event.payload?.commit) || repoUrl || ''
+    if (type === 'pull_request') return event.payload?.pull_request?.html_url || repoUrl || ''
+    if (type === 'issues') return event.payload?.issue?.html_url || repoUrl || ''
+    return repoUrl || ''
+  }
+  return event.payload?.url || ''
 }
 
 function App() {
@@ -96,7 +115,7 @@ function App() {
     }
 
     const typeClass = ['push', 'pull_request', 'issues'].includes(type) ? type : 'default'
-    return { title, repo, author, type, typeClass }
+    return { title, repo, author, type, typeClass, targetUrl: eventTargetUrl(evt, type) }
   }
 
   return (
@@ -141,9 +160,22 @@ function App() {
             </div>
           )}
           {events.map((evt) => {
-            const { title, repo, author, type, typeClass } = formatEvent(evt)
+            const { title, repo, author, type, typeClass, targetUrl } = formatEvent(evt)
+            const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+              if (!targetUrl || (event.key !== 'Enter' && event.key !== ' ')) return
+              event.preventDefault()
+              window.open(targetUrl, '_blank', 'noopener')
+            }
             return (
-              <div key={evt.id} className="event">
+              <div
+                key={evt.id}
+                className={`event ${targetUrl ? 'clickable' : ''}`}
+                role={targetUrl ? 'link' : undefined}
+                tabIndex={targetUrl ? 0 : undefined}
+                title={targetUrl ? `Open ${targetUrl}` : undefined}
+                onClick={() => targetUrl && window.open(targetUrl, '_blank', 'noopener')}
+                onKeyDown={onKeyDown}
+              >
                 <div className="event-header">
                   <span className={`event-type ${typeClass}`}>{type}</span>
                   <span className="event-time">{new Date(evt.receivedAt).toLocaleTimeString()}</span>
